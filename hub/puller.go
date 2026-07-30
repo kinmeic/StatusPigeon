@@ -10,14 +10,17 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	pkgmetrics "github.com/statuspigeon/metrics"
 )
+
+// maxPullBodyBytes 单次拉取响应体上限，防异常端点返回超大响应耗尽内存。
+const maxPullBodyBytes = 1 << 20
 
 // Puller 主动拉取器。
 type Puller struct {
@@ -70,19 +73,22 @@ func (p *Puller) Run(ctx context.Context) {
 	}
 }
 
+// pullAll 并行拉取全部目标（网络并发，入库经 SQLite 单连接串行化）。
 func (p *Puller) pullAll(ctx context.Context) {
+	var wg sync.WaitGroup
 	for _, t := range p.targets {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		p.pullOne(ctx, t)
+		wg.Add(1)
+		go func(t HostTarget) {
+			defer wg.Done()
+			p.pullOne(ctx, t)
+		}(t)
 	}
+	wg.Wait()
 }
 
-func (p *Puller) pullOne(_ context.Context, t HostTarget) {
-	req, err := http.NewRequest(http.MethodGet, t.Endpoint, nil)
+func (p *Puller) pullOne(ctx context.Context, t HostTarget) {
+	// 绑定 ctx：Hub 关闭时立即中断在途拉取。
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.Endpoint, nil)
 	if err != nil {
 		log.Printf("puller[%s]: 构造请求失败: %v", t.Name, err)
 		return
@@ -103,13 +109,18 @@ func (p *Puller) pullOne(_ context.Context, t HostTarget) {
 		return
 	}
 
+	// 限制响应体大小。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPullBodyBytes))
+	if err != nil {
+		log.Printf("puller[%s]: 读取响应失败: %v", t.Name, err)
+		return
+	}
 	var r pkgmetrics.Report
-	body, _ := io.ReadAll(resp.Body)
 	if err := json.Unmarshal(body, &r); err != nil {
 		log.Printf("puller[%s]: 解析响应失败: %v", t.Name, err)
 		return
 	}
-	// 若返回体未带 hostname，以 target 名补齐。
+	// 若返回体未带 hostname，以 target 名补齐（name 已经配置校验非空）。
 	if r.Hostname == "" {
 		r.Hostname = t.Name
 	}
@@ -118,26 +129,11 @@ func (p *Puller) pullOne(_ context.Context, t HostTarget) {
 		r.Timestamp = time.Now().Unix()
 	}
 
-	if err := p.ingest(t, &r); err != nil {
+	// 与 push 共用同一入库流程（source=pull）。
+	if err := Ingest(p.store, p.judge, &r, "pull"); err != nil {
 		log.Printf("puller[%s]: 入库失败: %v", t.Name, err)
 		return
 	}
 	log.Printf("puller[%s]: 拉取成功 | cpu=%.1f%% mem=%.1f%%",
 		r.Hostname, r.Metrics.Cpu.Usage, r.Metrics.Mem.UsedPct)
-}
-
-// ingest 拉取数据的入库流程（source=pull）。
-func (p *Puller) ingest(t HostTarget, r *pkgmetrics.Report) error {
-	hostID, err := p.store.UpsertHost(r, "pull")
-	if err != nil {
-		return fmt.Errorf("upsert host: %w", err)
-	}
-	status := p.judge.Status(r.Metrics)
-	if err := p.store.SetHostLive(hostID, status, r); err != nil {
-		return err
-	}
-	if err := p.store.InsertMetrics(hostID, r, status); err != nil {
-		return fmt.Errorf("insert metrics: %w", err)
-	}
-	return p.store.UpdateDailyAgg(hostID, r.Timestamp, status)
 }

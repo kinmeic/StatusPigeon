@@ -57,9 +57,10 @@ func systemdUnitPath(name string) string {
 
 func installSystemd(info ServiceInfo) error {
 	unitPath := systemdUnitPath(info.Name)
-	execStart := info.Binary
-	if len(info.Args) > 0 {
-		execStart += " " + strings.Join(info.Args, " ")
+	// systemd 按空格拆分 ExecStart，路径必须加引号。
+	execStart := systemdQuote(info.Binary)
+	for _, a := range info.Args {
+		execStart += " " + systemdQuote(a)
 	}
 	unit := fmt.Sprintf(`[Unit]
 Description=%s
@@ -111,14 +112,24 @@ func procdInitPath(name string) string {
 	return "/etc/init.d/" + name
 }
 
+// systemdQuote systemd 单元内的参数引号转义（双引号包裹，转义内部双引号与反斜杠）。
+func systemdQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
+}
+
+// shQuote POSIX shell 单引号转义：单引号内无任何展开，最安全。
+func shQuote(s string) string {
+	return `'` + strings.ReplaceAll(s, `'`, `'\''`) + `'`
+}
+
 // procdScript 生成 OpenWrt procd init 脚本。
 func procdScript(info ServiceInfo) string {
-	args := append([]string{info.Binary}, info.Args...)
-	// 为 shell 安全转义，简单用双引号包裹。
-	for i, a := range args {
-		args[i] = `"` + strings.ReplaceAll(a, `"`, `\"`) + `"`
+	parts := append([]string{info.Binary}, info.Args...)
+	for i, a := range parts {
+		parts[i] = shQuote(a)
 	}
-	execLine := strings.Join(args, " ")
+	execLine := strings.Join(parts, " ")
 
 	return fmt.Sprintf(`#!/bin/sh /etc/rc.common
 
@@ -135,7 +146,7 @@ start_service() {
 	procd_set_param stderr 1
 	procd_close_instance
 }
-`, execLine, info.WorkDir)
+`, execLine, shQuote(info.WorkDir))
 }
 
 func installProcd(info ServiceInfo) error {

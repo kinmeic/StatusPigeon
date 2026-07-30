@@ -7,6 +7,8 @@
 #   make clean
 #
 # modernc.org/sqlite 为纯 Go，无 cgo，可静态交叉编译。
+# 注意：其 libc 不支持 mips 架构，故 Hub 不提供 linux-mipsle 目标
+# （Agent 无此依赖，可正常交叉编译 mipsle/OpenWrt）。
 
 BINARY   := statuspigeon-hub
 DIST     := dist
@@ -17,7 +19,6 @@ TARGETS := \
 	linux-amd64:linux:amd64:: \
 	linux-arm64:linux:arm64:: \
 	linux-arm:linux:arm:7: \
-	linux-mipsle:linux:mipsle::softfloat \
 	linux-386:linux:386:: \
 	darwin-amd64:darwin:amd64:: \
 	darwin-arm64:darwin:arm64::

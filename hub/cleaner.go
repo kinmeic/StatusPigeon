@@ -13,8 +13,8 @@ import (
 
 // RunMaintenance 运行后台维护循环。阻塞直至 ctx 取消。
 func RunMaintenance(ctx context.Context, store *Store, cfg *Config) {
-	offlineEvery := cfg.ReportInterval                          // 与上报周期对齐检查失联
-	cleanupEvery := cfg.CleanupInterval                         // 清理较稀疏
+	offlineEvery := cfg.ReportInterval  // 与上报周期对齐检查失联
+	cleanupEvery := cfg.CleanupInterval // 清理较稀疏
 	retention := time.Duration(cfg.RetentionDays) * 24 * time.Hour
 
 	offlineTicker := time.NewTicker(offlineEvery)
@@ -55,9 +55,13 @@ func doOffline(store *Store, cfg *Config) {
 // doCleanup 按保留期清理数据。
 func doCleanup(store *Store, retention time.Duration) {
 	cutoff := time.Now().Add(-retention).Unix()
-	if err := store.Cleanup(cutoff); err != nil {
+	raw, daily, err := store.Cleanup(cutoff)
+	if err != nil {
 		log.Printf("数据清理出错: %v", err)
 		return
 	}
-	log.Printf("数据清理完成 (保留期 %v)", retention)
+	// 仅在实际删除时记日志，避免空转噪音。
+	if raw+daily > 0 {
+		log.Printf("数据清理: 删除原始指标 %d 条 / 日聚合 %d 条 (保留期 %v)", raw, daily, retention)
+	}
 }

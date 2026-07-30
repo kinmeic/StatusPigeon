@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -27,7 +28,7 @@ type Config struct {
 
 	// push 模式
 	ServerURL string `yaml:"server_url"` // 上报地址，如 http://hub/report
-	Token     string `yaml:"token"`      // 与 Hub AUTH_TOKEN 一致
+	Token     string `yaml:"token"`      // push：与 Hub auth 一致；listen：拉取鉴权
 	Interval  int    `yaml:"interval"`   // 上报间隔（秒），默认 300
 
 	// listen 模式
@@ -92,6 +93,9 @@ func loadConfig(path string) (*Config, error) {
 	case ModeListen:
 		if cfg.ListenAddr == "" {
 			cfg.ListenAddr = ":9527"
+		}
+		if cfg.Token == "" {
+			log.Println("警告: listen 模式未配置 token，/metrics 将无鉴权公开（公网暴露务必配置）")
 		}
 	}
 	return cfg, nil

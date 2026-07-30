@@ -6,8 +6,8 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +34,7 @@ type Config struct {
 	PullTargets  []HostTarget  `yaml:"pull_targets"`  // 主动拉取的目标列表
 
 	// 数据保留
-	RetentionDays int `yaml:"retention_days"` // metrics_raw/uptime_daily 保留天数，默认 90
+	RetentionDays int `yaml:"retention_days"`  // metrics_raw/uptime_daily 保留天数，默认 90
 	UptimeBarDays int `yaml:"uptime_bar_days"` // 状态页色块条天数，默认 90
 
 	// 状态判定阈值
@@ -115,8 +115,26 @@ func loadConfig(path string) (*Config, error) {
 	}
 	cfg.Auth = strings.TrimSpace(cfg.Auth)
 
+	// 安全提示：无鉴权运行 /report 意味着任何人都能伪造上报。
+	if cfg.Auth == "" {
+		log.Println("警告: 未配置 auth，POST /report 将无鉴权接收上报（公网环境务必配置）")
+	}
+
+	// 校验主动拉取目标：name 是 hostname 的回退值，endpoint 是拉取地址，均不可缺。
+	for i := range cfg.PullTargets {
+		t := &cfg.PullTargets[i]
+		if !t.Enabled {
+			continue
+		}
+		t.Name = strings.TrimSpace(t.Name)
+		t.Endpoint = strings.TrimSpace(t.Endpoint)
+		if t.Name == "" {
+			return nil, fmt.Errorf("pull_targets[%d] 已启用但缺少 name（用于主机标识）", i)
+		}
+		if t.Endpoint == "" {
+			return nil, fmt.Errorf("pull_targets[%d] (%s) 已启用但缺少 endpoint", i, t.Name)
+		}
+	}
+
 	return cfg, nil
 }
-
-// parseSeconds 辅助：yaml 中若用整数秒配置时间，这里不强求；保留以备扩展。
-var _ = strconv.Atoi

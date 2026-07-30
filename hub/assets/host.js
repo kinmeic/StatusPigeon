@@ -48,9 +48,18 @@
       const ips = [...(s.ipv4 || []), ...(s.ipv6 || [])].join(', ');
       if (ips) ipLine = ' · IP ' + ips;
     } catch (e) { /* ignore */ }
+    // 安全：os/kernel/arch/IP 均来自 agent 上报数据，插入 innerHTML 前必须转义。
+    const metaText = [h.os || '', h.kernel || '', h.arch || '']
+      .filter(Boolean).join(' · ') + ipLine;
     document.getElementById('host-badge').innerHTML =
       `<span class="badge badge-${cls}">${STATUS_LABEL[cls] || cls}</span>` +
-      ` <span class="host-meta">${h.os || ''} · ${h.kernel || ''} · ${h.arch || ''}${ipLine}</span>`;
+      ` <span class="host-meta">${escapeHtml(metaText)}</span>`;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
   }
 
   async function loadCharts(range) {

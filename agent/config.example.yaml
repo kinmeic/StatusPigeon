@@ -12,7 +12,10 @@ hostname: ""
 # ====== push 模式专用 ======
 # 上报地址（push 模式必填）。
 server_url: "http://localhost:9527/report"
-# 与 Hub config 中 AUTH_TOKEN 一致（push 模式必填）。
+# 鉴权 token：
+#   push   模式：与 Hub config 中的 auth 一致（必填）。
+#   listen 模式：拉取鉴权，与 Hub pull_targets[].token 一致；留空则不鉴权（不推荐）。
+# 生成：openssl rand -hex 32
 token: "change-me-to-a-long-random-secret"
 # 上报间隔（秒），默认 300（5 分钟）。
 interval: 300
@@ -20,6 +23,3 @@ interval: 300
 # ====== listen 模式专用 ======
 # 监听地址（listen 模式）。留空则 :9527。
 listen_addr: ":9527"
-# 拉取鉴权 token；为空则不鉴权（不推荐）。
-# 建议 Hub 配置中的 pull token 与此一致。
-token: "change-me-to-a-long-random-secret"

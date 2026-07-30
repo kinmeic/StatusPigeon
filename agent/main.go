@@ -14,6 +14,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
@@ -98,15 +99,18 @@ func runPush(collector *Collector, cfg *Config) {
 func runListen(collector *Collector, cfg *Config) {
 	listener := NewListener(collector, cfg.ListenAddr, cfg.Token)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-stop
 		log.Printf("收到信号 %v，退出。", sig)
-		os.Exit(0)
+		cancel() // 触发 listener 平滑关闭
 	}()
 
-	if err := listener.Start(); err != nil {
+	if err := listener.Start(ctx); err != nil {
 		log.Fatalf("listen 服务启动失败: %v", err)
 	}
 }

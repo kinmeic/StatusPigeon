@@ -1,14 +1,16 @@
 // Package main: handler.go — HTTP 路由与处理器。
 //
 // 端点：
-//   POST /report            接收 push 上报（Bearer 鉴权）
-//   GET  /api/hosts         主机列表 + 最新状态
-//   GET  /api/status        全部主机最近 N 天聚合（色块条）
-//   GET  /api/metrics?id=&range=  单主机指标序列（趋势图）
-//   GET  /                  静态状态页（embed）
+//
+//	POST /report            接收 push 上报（Bearer 鉴权）
+//	GET  /api/hosts         主机列表 + 最新状态
+//	GET  /api/status        全部主机最近 N 天聚合（色块条）
+//	GET  /api/metrics?id=&range=  单主机指标序列（趋势图）
+//	GET  /                  静态状态页（embed）
 package main
 
 import (
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"io"
@@ -20,6 +22,10 @@ import (
 
 	pkgmetrics "github.com/statuspigeon/metrics"
 )
+
+// maxReportBodyBytes /report 请求体上限，防恶意大请求耗尽内存。
+// 正常上报体仅数 KB，1MB 已非常宽裕。
+const maxReportBodyBytes = 1 << 20
 
 // Server 持有运行期依赖。
 type Server struct {
@@ -54,16 +60,14 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// 鉴权。
-	if s.auth != "" {
-		got := r.Header.Get("Authorization")
-		if got != "Bearer "+s.auth {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	// 鉴权（恒定时间比较，防时序侧信道）。
+	if s.auth != "" && !bearerOK(r.Header.Get("Authorization"), s.auth) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	// 限制请求体大小。
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxReportBodyBytes))
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
@@ -83,7 +87,7 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := Ingest(s.store, s.judge, &report); err != nil {
+	if err := Ingest(s.store, s.judge, &report, "push"); err != nil {
 		log.Printf("ingest 失败: %v", err)
 		http.Error(w, "ingest failed", http.StatusInternalServerError)
 		return
@@ -91,9 +95,27 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// bearerOK 恒定时间比较 Authorization 头与期望 token。
+func bearerOK(got, token string) bool {
+	want := "Bearer " + token
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+// requireGET 仅允许 GET，否则 405 并返回 false。
+func requireGET(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return false
+	}
+	return true
+}
+
 // ====== GET /api/hosts ======
 
 func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
+	if !requireGET(w, r) {
+		return
+	}
 	hosts, err := s.store.ListHosts()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errMap(err))
@@ -105,6 +127,9 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 // ====== GET /api/status?days= ======
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if !requireGET(w, r) {
+		return
+	}
 	days := s.barDays
 	if v := r.URL.Query().Get("days"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 365 {
@@ -137,6 +162,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // ====== GET /api/metrics?id=&range=1h|24h|7d ======
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if !requireGET(w, r) {
+		return
+	}
 	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
 	if err != nil || id <= 0 {
 		http.Error(w, "invalid id", http.StatusBadRequest)

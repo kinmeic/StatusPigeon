@@ -3,6 +3,7 @@
 // 根据指标判定单次样本状态：
 //   - degraded：cpu > 阈值 或 mem > 阈值
 //   - operational：其余
+//
 // down（失联）由 store.MarkOffline 在后台扫描时统一处理。
 package main
 

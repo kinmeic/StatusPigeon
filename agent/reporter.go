@@ -30,6 +30,9 @@ func NewReporter(serverURL, token string) *Reporter {
 	}
 }
 
+// maxErrorBodyBytes 读取服务端错误响应体的上限，仅用于错误日志。
+const maxErrorBodyBytes = 64 << 10
+
 // Send 上报一次。返回服务端响应体（用于日志）。
 func (r *Reporter) Send(report *pkgmetrics.Report) error {
 	body, err := json.Marshal(report)
@@ -50,7 +53,8 @@ func (r *Reporter) Send(report *pkgmetrics.Report) error {
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	// 错误响应体仅用于日志，限制读取上限防异常端点耗尽内存。
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("服务端拒绝 (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}

@@ -8,7 +8,7 @@
   - **Push**：Agent 主动上报。穿透 NAT，适合家用机、OpenWrt 路由器、内网服务器。
   - **Pull**：Hub 主动拉取。适合有公网域名、可直接访问的云主机。
 - **失联检测**：Agent 掉线/断网/宕机，Hub 通过超时判定自动标记为 `down`。
-- **单二进制部署**：Hub / Agent 各一个可执行文件，纯 Go 无 cgo，可交叉编译到 Linux/Mac/OpenWrt(mipsle) 等。
+- **单二进制部署**：Hub / Agent 各一个可执行文件，纯 Go 无 cgo，可交叉编译。Agent 支持 Linux/Mac/OpenWrt(mipsle) 等；Hub 因 SQLite 驱动（modernc.org/sqlite）限制不支持 mips 架构（Hub 一般部署在标准服务器上）。
 - **精简指标**：基础信息 + CPU + 内存 + 负载。
 - **状态页 UI**：90 天 uptime 色块条 + hover 详情 + 主机趋势图（Chart.js）。
 - **数据自管理**：SQLite，按天自动清理过期数据。

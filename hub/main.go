@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -62,12 +63,20 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 后台：主动拉取循环。
+	// 后台：主动拉取循环 + 失联扫描/数据清理。用 WaitGroup 等待其退出，
+	// 避免 main 返回后 store.Close() 与在途写库竞争。
+	var wg sync.WaitGroup
 	puller := NewPuller(cfg, store, judge)
-	go puller.Run(ctx)
-
-	// 后台：失联扫描 + 数据清理。
-	go RunMaintenance(ctx, store, cfg)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		puller.Run(ctx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		RunMaintenance(ctx, store, cfg)
+	}()
 
 	srv := NewServer(store, judge, cfg.Auth, cfg.UptimeBarDays, assetsFS)
 	httpSrv := &http.Server{
@@ -76,14 +85,16 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// 优雅退出。
+	// 优雅退出：先停后台循环，再平滑关闭 HTTP（等待在途请求完成）。
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		s := <-sig
 		log.Printf("收到信号 %v，关闭中...", s)
 		cancel()
-		_ = httpSrv.Close()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
 	log.Printf("Status-Pigeon Hub 启动 | 地址=%s | 拉取间隔=%v | 保留=%d天",
@@ -91,6 +102,9 @@ func main() {
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("HTTP 服务失败: %v", err)
 	}
+	// HTTP 已停止；若由外部错误而非信号触发退出，也确保后台循环终止。
+	cancel()
+	wg.Wait()
 }
 
 // serviceInfo 返回用于服务安装的基础信息。

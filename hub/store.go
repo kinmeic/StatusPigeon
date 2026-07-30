@@ -107,69 +107,96 @@ type HostRow struct {
 	Source      string `json:"source"`
 }
 
-// UpsertHost 创建或更新主机记录，返回 host_id。
-// source 标记数据来源（push/pull），用于区分。
-func (s *Store) UpsertHost(r *pkgmetrics.Report, source string) (int64, error) {
+// sqlRunner 抽象 *sql.DB 与 *sql.Tx 的公共执行接口，便于事务复用子步骤。
+type sqlRunner interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
+// Ingest 在单个事务中完成一次上报入库：
+// upsert host → 刷新存活状态 → 写原始指标 → 更新当天聚合。
+// status 由 Judge 预先判定；source 标记 "push" / "pull"。
+func (s *Store) Ingest(r *pkgmetrics.Report, source, status string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("开启事务: %w", err)
+	}
+	defer tx.Rollback()
+
+	hostID, err := upsertHost(tx, r, source)
+	if err != nil {
+		return fmt.Errorf("upsert host: %w", err)
+	}
+	if err := setHostLive(tx, hostID, status, r); err != nil {
+		return fmt.Errorf("set host live: %w", err)
+	}
+	if err := insertMetrics(tx, hostID, r); err != nil {
+		return fmt.Errorf("insert metrics: %w", err)
+	}
+	if err := updateDailyAgg(tx, hostID, r.Timestamp, status); err != nil {
+		return fmt.Errorf("update daily: %w", err)
+	}
+	return tx.Commit()
+}
+
+// upsertHost 创建或更新主机记录，返回 host_id。
+// last_seen 使用服务端接收时间，避免 agent 时钟偏差干扰失联判定。
+//
+// 注意：必须用 RETURNING 取 id，而非 res.LastInsertId() ——
+// UPSERT 冲突更新后该值依驱动/版本语义不定（可能残留同连接上
+// 其他表上一次 INSERT 的 rowid），曾导致 host_id 错乱、metrics 外键失败。
+func upsertHost(run sqlRunner, r *pkgmetrics.Report, source string) (int64, error) {
 	osName, kernel, arch := r.Metrics.Os.Os, r.Metrics.Os.Kernel, r.Metrics.Os.Arch
 	summary := hostSummary(r.Metrics)
 	now := time.Now().Unix()
 
-	res, err := s.db.Exec(
+	var id int64
+	err := run.QueryRow(
 		`INSERT INTO hosts (hostname, agent_version, os, kernel, arch, last_seen, created_at, last_status, last_summary, source)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(hostname) DO UPDATE SET
 		    agent_version=excluded.agent_version,
 		    os=excluded.os, kernel=excluded.kernel, arch=excluded.arch,
 		    last_seen=excluded.last_seen, last_status=excluded.last_status,
-		    last_summary=excluded.last_summary, source=excluded.source`,
-		r.Hostname, r.AgentVersion, osName, kernel, arch, r.Timestamp, now, statusOperational, summary, source,
-	)
+		    last_summary=excluded.last_summary, source=excluded.source
+		 RETURNING id`,
+		r.Hostname, r.AgentVersion, osName, kernel, arch, now, now, statusOperational, summary, source,
+	).Scan(&id)
 	if err != nil {
-		return 0, fmt.Errorf("upsert host: %w", err)
+		return 0, err
 	}
-	// ON CONFLICT 更新时 LastInsertId 通常为 0，需查回。
-	if id, _ := res.LastInsertId(); id != 0 {
-		return id, nil
-	}
-	return s.getHostID(r.Hostname)
+	return id, nil
 }
 
-func (s *Store) getHostID(hostname string) (int64, error) {
-	var id int64
-	err := s.db.QueryRow(`SELECT id FROM hosts WHERE hostname = ?`, hostname).Scan(&id)
-	return id, err
-}
-
-// SetHostLive 主机存活时按判定状态刷新 last_status/last_summary。
-// UpsertHost 默认写 operational；若 Judge 判为 degraded 需在此校正。
-func (s *Store) SetHostLive(hostID int64, status string, r *pkgmetrics.Report) error {
+// setHostLive 主机存活时按判定状态刷新 last_status/last_summary/last_seen。
+func setHostLive(run sqlRunner, hostID int64, status string, r *pkgmetrics.Report) error {
 	summary := hostSummary(r.Metrics)
-	_, err := s.db.Exec(
+	_, err := run.Exec(
 		`UPDATE hosts SET last_status=?, last_summary=?, last_seen=? WHERE id=?`,
-		status, summary, r.Timestamp, hostID,
+		status, summary, time.Now().Unix(), hostID,
 	)
 	return err
 }
 
-// InsertMetrics 写入原始指标。
-func (s *Store) InsertMetrics(hostID int64, r *pkgmetrics.Report, status string) error {
+// insertMetrics 写入原始指标。
+func insertMetrics(run sqlRunner, hostID int64, r *pkgmetrics.Report) error {
 	cpu, mem, load1 := r.Metrics.Cpu.Usage, r.Metrics.Mem.UsedPct, r.Metrics.Cpu.Load1
 	payload, _ := jsonMarshal(r)
-	_, err := s.db.Exec(
+	_, err := run.Exec(
 		`INSERT INTO metrics_raw (host_id, ts, cpu_usage, mem_usage, load1, payload) VALUES (?, ?, ?, ?, ?, ?)`,
 		hostID, r.Timestamp, cpu, mem, load1, payload,
 	)
 	return err
 }
 
-// UpdateDailyAgg 更新某主机当天聚合。
+// updateDailyAgg 更新某主机当天聚合。
 // status 为本次样本状态（operational/degraded）。down 由失联扫描单独处理。
-func (s *Store) UpdateDailyAgg(hostID int64, ts int64, status string) error {
+func updateDailyAgg(run sqlRunner, hostID int64, ts int64, status string) error {
 	date := time.Unix(ts, 0).Format("2006-01-02")
 	isDegraded := status == statusDegraded
 
 	// UPSERT 当天聚合行，累加样本计数。
-	_, err := s.db.Exec(
+	_, err := run.Exec(
 		`INSERT INTO uptime_daily (host_id, date, status, uptime_pct, total_samples, degraded_samples, down_samples)
 		 VALUES (?, ?, ?, 0, 1, ?, 0)
 		 ON CONFLICT(host_id, date) DO UPDATE SET
@@ -181,13 +208,13 @@ func (s *Store) UpdateDailyAgg(hostID int64, ts int64, status string) error {
 		return err
 	}
 	// 重算当天 status（取最差）与 uptime_pct。
-	return s.recomputeDaily(hostID, date)
+	return recomputeDaily(run, hostID, date)
 }
 
 // recomputeDaily 根据当天样本重算 status/uptime_pct。
-func (s *Store) recomputeDaily(hostID int64, date string) error {
+func recomputeDaily(run sqlRunner, hostID int64, date string) error {
 	var total, degraded int
-	err := s.db.QueryRow(
+	err := run.QueryRow(
 		`SELECT total_samples, degraded_samples FROM uptime_daily WHERE host_id=? AND date=?`,
 		hostID, date,
 	).Scan(&total, &degraded)
@@ -200,47 +227,66 @@ func (s *Store) recomputeDaily(hostID int64, date string) error {
 	}
 	// uptime_pct = 非降级样本占比。
 	uptime := float64(total-degraded) / float64(total) * 100.0
-	_, err = s.db.Exec(
+	_, err = run.Exec(
 		`UPDATE uptime_daily SET status=?, uptime_pct=? WHERE host_id=? AND date=?`,
 		dayStatus, uptime, hostID, date,
 	)
 	return err
 }
 
-// MarkOffline 失联判定：将 last_seen 超期、当前非 down 的主机标记为 down，
-// 并给失联当天写入/更新一条 down 聚合。返回受影响主机数。
+// MarkOffline 失联判定：将 last_seen 超期的主机标记为 down，并给失联当天
+// 写入/更新一条 down 聚合。整个离线期间每一天都会标记为 down（而非仅首日），
+// 保证状态页色块条在长时间故障中持续显示红色。
+// 返回本次新转为 down 的主机数（不含已处于 down 的）。
 func (s *Store) MarkOffline(thresholdTs int64) (int, error) {
-	rows, err := s.db.Query(
-		`SELECT id FROM hosts WHERE last_seen < ? AND (last_status IS NULL OR last_status <> ?)`,
-		thresholdTs, statusDown,
-	)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("开启事务: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 取全部失联主机（含已 down 的：后续每一天都要持续标记）。
+	rows, err := tx.Query(`SELECT id, COALESCE(last_status,'') FROM hosts WHERE last_seen < ?`, thresholdTs)
 	if err != nil {
 		return 0, err
 	}
-	var ids []int64
+	type offlineHost struct {
+		id     int64
+		status string
+	}
+	var hosts []offlineHost
 	for rows.Next() {
-		var id int64
-		_ = rows.Scan(&id)
-		ids = append(ids, id)
+		var h offlineHost
+		_ = rows.Scan(&h.id, &h.status)
+		hosts = append(hosts, h)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 
 	date := time.Now().Format("2006-01-02")
-	for _, id := range ids {
-		if _, err := s.db.Exec(`UPDATE hosts SET last_status=? WHERE id=?`, statusDown, id); err != nil {
-			return len(ids), err
+	newly := 0
+	for _, h := range hosts {
+		// 状态迁移：仅非 down → down 时更新 hosts 表。
+		if h.status != statusDown {
+			if _, err := tx.Exec(`UPDATE hosts SET last_status=? WHERE id=?`, statusDown, h.id); err != nil {
+				return newly, err
+			}
+			newly++
 		}
-		// 当天标记为 down（若当天无样本，插入一条纯 down 行）。
-		if _, err := s.db.Exec(
+		// 当天聚合标记为 down（幂等：每次扫描重复写同一状态）。
+		if _, err := tx.Exec(
 			`INSERT INTO uptime_daily (host_id, date, status, uptime_pct, total_samples, degraded_samples, down_samples)
 			 VALUES (?, ?, ?, 0, 1, 0, 1)
-			 ON CONFLICT(host_id, date) DO UPDATE SET down_samples = uptime_daily.down_samples + 1, status = ?`,
-			id, date, statusDown, statusDown,
+			 ON CONFLICT(host_id, date) DO UPDATE SET
+			    down_samples = uptime_daily.down_samples + 1, status = ?`,
+			h.id, date, statusDown, statusDown,
 		); err != nil {
-			return len(ids), err
+			return newly, err
 		}
 	}
-	return len(ids), nil
+	return newly, tx.Commit()
 }
 
 // ListHosts 返回全部主机。
@@ -313,12 +359,18 @@ type DailyPoint struct {
 	Uptime float64 `json:"uptime"`
 }
 
-// MetricsSeries 趋势查询：返回时间范围内的 cpu/mem/load 序列。
+// maxSeriesPoints 趋势查询单次返回的最大点数，防高频上报时响应体过大。
+const maxSeriesPoints = 10000
+
+// MetricsSeries 趋势查询：返回时间范围内的 cpu/mem/load 序列（升序）。
+// 超过 maxSeriesPoints 时取最新的 N 条。
 func (s *Store) MetricsSeries(hostID int64, fromTs int64) ([]MetricPoint, error) {
 	rows, err := s.db.Query(
-		`SELECT ts, cpu_usage, mem_usage, load1 FROM metrics_raw
-		 WHERE host_id=? AND ts >= ? ORDER BY ts`,
-		hostID, fromTs,
+		`SELECT ts, cpu_usage, mem_usage, load1 FROM (
+		    SELECT ts, cpu_usage, mem_usage, load1 FROM metrics_raw
+		    WHERE host_id=? AND ts >= ? ORDER BY ts DESC LIMIT ?
+		) ORDER BY ts`,
+		hostID, fromTs, maxSeriesPoints,
 	)
 	if err != nil {
 		return nil, err
@@ -344,14 +396,20 @@ type MetricPoint struct {
 	Load *float64 `json:"load1"`
 }
 
-// Cleanup 删除早于 cutoffTs 的原始与聚合数据。
-func (s *Store) Cleanup(cutoffTs int64) error {
+// Cleanup 删除早于 cutoffTs 的原始与聚合数据，返回两类各自的删除条数。
+func (s *Store) Cleanup(cutoffTs int64) (rawDeleted, dailyDeleted int64, err error) {
 	cutoffDate := time.Unix(cutoffTs, 0).Format("2006-01-02")
-	if _, err := s.db.Exec(`DELETE FROM metrics_raw WHERE ts < ?`, cutoffTs); err != nil {
-		return err
+	res, err := s.db.Exec(`DELETE FROM metrics_raw WHERE ts < ?`, cutoffTs)
+	if err != nil {
+		return 0, 0, err
 	}
-	_, err := s.db.Exec(`DELETE FROM uptime_daily WHERE date < ?`, cutoffDate)
-	return err
+	rawDeleted, _ = res.RowsAffected()
+	res, err = s.db.Exec(`DELETE FROM uptime_daily WHERE date < ?`, cutoffDate)
+	if err != nil {
+		return rawDeleted, 0, err
+	}
+	dailyDeleted, _ = res.RowsAffected()
+	return rawDeleted, dailyDeleted, nil
 }
 
 // ====== 状态常量 ======
