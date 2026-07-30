@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Status Pigeon — 主机详情</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="container">
+    <a class="back-link" href="/">← 返回状态总览</a>
+    <header class="detail-head" style="margin-top:16px">
+      <h1 id="host-title" style="margin:0 0 6px">主机详情</h1>
+      <div id="host-badge"></div>
+    </header>
+
+    <div class="range-tabs">
+      <button data-range="1h">1 小时</button>
+      <button data-range="24h" class="active">24 小时</button>
+      <button data-range="7d">7 天</button>
+    </div>
+
+    <div class="chart-box">
+      <h3>CPU 使用率 (%)</h3>
+      <canvas id="chart-cpu"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>内存使用率 (%)</h3>
+      <canvas id="chart-mem"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>系统负载 (load)</h3>
+      <canvas id="chart-load"></canvas>
+    </div>
+  </div>
+  <script src="/vendor/chart.min.js"></script>
+  <script src="/host.js"></script>
+</body>
+</html>

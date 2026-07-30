@@ -1,0 +1,25 @@
+# Status-Pigeon Agent 配置示例
+# 复制为 config.yaml 后按需修改（或改用环境变量 STATUSPIGEON_* 覆盖）。
+
+# 运行模式：
+#   push   主动上报到 Hub。适合 NAT 后、无公网 IP 的机器（默认）。
+#   listen 暴露 /metrics 供 Hub 拉取。适合有公网域名的机器。
+mode: push
+
+# 主机名，留空则自动取系统主机名。
+hostname: ""
+
+# ====== push 模式专用 ======
+# 上报地址（push 模式必填）。
+server_url: "http://localhost:9527/report"
+# 与 Hub config 中 AUTH_TOKEN 一致（push 模式必填）。
+token: "change-me-to-a-long-random-secret"
+# 上报间隔（秒），默认 300（5 分钟）。
+interval: 300
+
+# ====== listen 模式专用 ======
+# 监听地址（listen 模式）。留空则 :9527。
+listen_addr: ":9527"
+# 拉取鉴权 token；为空则不鉴权（不推荐）。
+# 建议 Hub 配置中的 pull token 与此一致。
+token: "change-me-to-a-long-random-secret"

@@ -1,0 +1,24 @@
+# 编译产物
+/dist/
+/hub/dist/
+/agent/dist/
+
+# 运行时数据
+/data/
+/hub/data/
+*.db
+*.db-wal
+*.db-shm
+
+# 本地配置（保留 .example.yaml）
+config.yaml
+config-*.yaml
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 工具工作区
+.zcode/

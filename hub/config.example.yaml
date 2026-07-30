@@ -1,0 +1,43 @@
+# Status-Pigeon Hub（监控中心）配置示例
+# 复制为 config.yaml 后按需修改。
+
+# HTTP 服务监听地址。
+http_addr: ":9527"
+
+# push 上报鉴权 token。需与 push 模式 agent 的 token 一致。
+# 留空则不鉴权（不推荐）。生成：openssl rand -hex 32
+auth: "change-me-to-a-long-random-secret"
+
+# ====== 主动监控（pull） ======
+# 拉取间隔（拉取 listen 模式 agent 的 /metrics）。
+pull_interval: 5m
+# 单次拉取超时。
+pull_timeout: 10s
+# 主动拉取的目标列表（有公网域名的主机）。
+pull_targets:
+  - name: "web-public"
+    endpoint: "http://web.example.com:9527/metrics"
+    token: "change-me-to-a-long-random-secret"   # 与该 agent listen token 一致
+    enabled: true
+  # - name: "router-public"
+  #   endpoint: "http://1.2.3.4:9527/metrics"
+  #   token: "..."
+  #   enabled: true
+
+# ====== 数据保留 ======
+retention_days: 90
+uptime_bar_days: 90   # 状态页色块条展示天数
+
+# ====== 状态判定阈值 ======
+degraded_cpu: 90.0    # CPU % 超过则 degraded
+degraded_mem: 95.0    # 内存 % 超过则 degraded
+
+# ====== 失联判定（push 主机） ======
+report_interval: 5m   # 上报周期
+offline_periods: 3    # 超过 N 个周期无数据判 down
+
+# ====== 清理 ======
+cleanup_interval: 1h  # 后台清理循环间隔
+
+# ====== 存储 ======
+db_path: "data/statuspigeon.db"
