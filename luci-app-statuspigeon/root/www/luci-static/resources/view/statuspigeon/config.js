@@ -60,21 +60,42 @@ function renderStatusError(error) {
 		(error && error.message ? error.message : _('Unknown error'));
 }
 
+function emptyStatus() {
+	return {
+		status: 'never',
+		last_attempt: 0,
+		last_success: 0,
+		reason: '',
+		http_code: 0,
+		message: ''
+	};
+}
+
+function parseStatusFile(contents) {
+	var data = emptyStatus();
+	String(contents || '').split(/\r?\n/).forEach(function (line) {
+		var separator = line.indexOf('=');
+		if (separator < 1)
+			return;
+		data[line.slice(0, separator)] = line.slice(separator + 1);
+	});
+	data.last_attempt = Number(data.last_attempt || 0);
+	data.last_success = Number(data.last_success || 0);
+	data.http_code = Number(data.http_code || 0);
+	return data;
+}
+
 function refreshStatus() {
-	return fs.exec('/usr/bin/statuspigeon-status', [], null).then(function (result) {
-		if (result.code !== 0)
-			throw new Error(result.stderr || _('Status command failed'));
-
-		var data;
-		try {
-			data = JSON.parse(result.stdout || '{}');
-		} catch (error) {
-			throw new Error(_('Invalid status response'));
-		}
-
+	return fs.read('/var/run/statuspigeon/last-report').then(function (contents) {
+		var data = parseStatusFile(contents);
 		renderStatus(data);
 		return data;
 	}, function (error) {
+		if (error && (error.name === 'NotFoundError' || error.name === 'NoDataError')) {
+			var data = emptyStatus();
+			renderStatus(data);
+			return data;
+		}
 		renderStatusError(error);
 		return null;
 	});

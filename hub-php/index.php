@@ -9,18 +9,16 @@
 <body>
   <div class="container">
     <header class="page-head">
-      <h1>Status Pigeon</h1>
+      <div class="title-row">
+        <h1>Status Pigeon</h1>
+        <a class="admin-link" href="admin.php">管理</a>
+      </div>
       <p class="subtitle">服务器状态监控</p>
       <div id="overall" class="banner banner-loading" hidden>加载中…</div>
     </header>
     <main id="host-list" class="host-list">
       <p class="empty">正在加载主机数据…</p>
     </main>
-    <footer class="page-foot">
-      <span id="updated-at"></span>
-      <span class="footer-separator"> · </span>
-      <a href="admin.php">管理</a>
-    </footer>
   </div>
   <div id="tooltip" class="tooltip" hidden></div>
   <script src="assets/status.js"></script>

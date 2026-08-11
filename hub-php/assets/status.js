@@ -99,8 +99,6 @@
       return response.json();
     }).then(function (hosts) {
       render(hosts);
-      document.getElementById('updated-at').textContent =
-        '更新于 ' + new Date().toLocaleTimeString('zh-CN');
     }).catch(function (error) {
       var banner = document.getElementById('overall');
       banner.className = 'banner banner-down';

@@ -4,7 +4,9 @@
     "read": {
       "uci": [ "statuspigeon" ],
       "file": {
-        "/usr/bin/statuspigeon-status": [ "exec" ]
+        "/usr/bin/statuspigeon-status": [ "exec" ],
+        "/usr/bin/statuspigeon-report": [ "exec" ],
+        "/var/run/statuspigeon/last-report": [ "read" ]
       }
     },
     "write": {

@@ -40,6 +40,8 @@ state_write() {
 		printf 'http_code=%s\n' "$http_code"
 		printf 'message=%s\n' "$message"
 	} > "$temporary" && mv "$temporary" "$state_file"
+	chmod 0755 "$state_dir" 2>/dev/null || true
+	chmod 0644 "$state_file" 2>/dev/null || true
 	rm -f "$temporary"
 }
 
