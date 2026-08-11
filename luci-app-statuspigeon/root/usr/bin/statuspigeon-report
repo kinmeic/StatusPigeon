@@ -1,0 +1,164 @@
+#!/bin/sh
+# One-shot OpenWrt reporter. It emits the same JSON shape as pkg/metrics and
+# posts it to the PHP or Go hub. Required runtime tools are BusyBox, curl and
+# libubox jshn; no jq or resident listener is needed.
+
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+umask 077
+reason="${1:-timer}"
+
+get_uci() {
+	uci -q get "$1" 2>/dev/null || true
+}
+
+log_msg() {
+	logger -t statuspigeon -- "$1" 2>/dev/null || echo "statuspigeon: $1" >&2
+}
+
+enabled="$(get_uci statuspigeon.main.enabled)"
+[ "$enabled" = "1" ] || exit 0
+
+endpoint="$(get_uci statuspigeon.main.endpoint)"
+api_key="$(get_uci statuspigeon.main.api_key)"
+timeout="$(get_uci statuspigeon.main.timeout)"
+hostname="$(get_uci statuspigeon.main.hostname)"
+
+[ -n "$endpoint" ] || { log_msg "endpoint is empty"; exit 1; }
+[ -n "$api_key" ] || { log_msg "api_key is empty"; exit 1; }
+case "$endpoint" in
+	http://*|https://*) ;;
+	*) log_msg "endpoint must start with http:// or https://"; exit 1 ;;
+esac
+
+# Accept either a full report path or a hub base URL. This also makes the
+# default usable with the PHP layout where /report/index.php is a real file.
+case "$endpoint" in
+	*/report/index.php) ;;
+	*/report) endpoint="${endpoint}/index.php" ;;
+	*/report/) endpoint="${endpoint}index.php" ;;
+	*/) endpoint="${endpoint}report/index.php" ;;
+	*) endpoint="${endpoint}/report/index.php" ;;
+esac
+
+case "$timeout" in
+	''|*[!0-9]*) timeout=15 ;;
+esac
+[ "$timeout" -gt 0 ] 2>/dev/null || timeout=15
+
+# Prevent a network hotplug report and the timer from posting at the same
+# time. A stale lock is safe to remove after its recorded process disappears.
+lock_dir=/var/run/statuspigeon-report.lock
+if [ -d "$lock_dir" ]; then
+	lock_pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+	if [ -n "$lock_pid" ] && [ -d "/proc/$lock_pid" ]; then
+		exit 0
+	fi
+	rm -rf "$lock_dir"
+fi
+mkdir "$lock_dir" 2>/dev/null || exit 0
+echo "$$" > "$lock_dir/pid"
+trap 'rm -rf /var/run/statuspigeon-report.lock' EXIT HUP INT TERM
+
+hostname="${hostname:-$(cat /proc/sys/kernel/hostname 2>/dev/null || uname -n)}"
+agent_version="$(get_uci statuspigeon.main.agent_version)"
+agent_version="${agent_version:-luci-app-statuspigeon/1.0}"
+timestamp="$(date +%s)"
+uptime="$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)"
+kernel="$(uname -r 2>/dev/null || echo unknown)"
+arch="$(uname -m 2>/dev/null || echo unknown)"
+
+os_name="OpenWrt"
+if [ -r /etc/openwrt_release ]; then
+	os_from_file="$(sed -n 's/^DISTRIB_ID=//p' /etc/openwrt_release 2>/dev/null | head -n1 | tr -d "'")"
+	[ -n "$os_from_file" ] && os_name="$os_from_file"
+fi
+
+# Read two /proc/stat snapshots to obtain a portable aggregate CPU percentage.
+cpu_snapshot() {
+	awk '/^cpu / {print $2, $3, $4, $5, $6, $7, $8, $9; exit}' /proc/stat
+}
+cpu_1="$(cpu_snapshot)"
+sleep 1
+cpu_2="$(cpu_snapshot)"
+set -- $cpu_1
+u1="${1:-0}"; n1="${2:-0}"; s1="${3:-0}"; i1="${4:-0}"; w1="${5:-0}"; q1="${6:-0}"; r1="${7:-0}"; t1="${8:-0}"
+set -- $cpu_2
+u2="${1:-0}"; n2="${2:-0}"; s2="${3:-0}"; i2="${4:-0}"; w2="${5:-0}"; q2="${6:-0}"; r2="${7:-0}"; t2="${8:-0}"
+cpu_usage="$(awk -v u1="$u1" -v n1="$n1" -v s1="$s1" -v i1="$i1" -v w1="$w1" -v q1="$q1" -v r1="$r1" -v t1="$t1" -v u2="$u2" -v n2="$n2" -v s2="$s2" -v i2="$i2" -v w2="$w2" -v q2="$q2" -v r2="$r2" -v t2="$t2" 'BEGIN { a=u2+n2+s2+i2+w2+q2+r2+t2-(u1+n1+s1+i1+w1+q1+r1+t1); b=(i2+w2)-(i1+w1); if (a <= 0) printf "0.00"; else printf "%.2f", (a-b)*100/a }')"
+
+set -- $(awk '/^MemTotal:/{total=$2*1024} /^MemAvailable:/{available=$2*1024} /^MemFree:/{free=$2*1024} /^Buffers:/{buffers=$2*1024} /^Cached:/{cached=$2*1024} /^SwapTotal:/{swap_total=$2*1024} /^SwapFree:/{swap_free=$2*1024} END { if (available == 0) available=free+buffers+cached; used=total-available; if (used < 0) used=0; if (total > 0) pct=used*100/total; else pct=0; swap_used=swap_total-swap_free; if (swap_used < 0) swap_used=0; printf "%d %d %d %.2f %d %d", total, used, available, pct, swap_total, swap_used }' /proc/meminfo)
+mem_total="${1:-0}"; mem_used="${2:-0}"; mem_available="${3:-0}"; mem_used_pct="${4:-0}"; swap_total="${5:-0}"; swap_used="${6:-0}"
+
+load_values="$(awk '{print $1, $2, $3}' /proc/loadavg 2>/dev/null || echo '0 0 0')"
+set -- $load_values
+load1="${1:-0}"; load5="${2:-0}"; load15="${3:-0}"
+
+. /usr/share/libubox/jshn.sh
+
+json_add_number() {
+	if type json_add_double >/dev/null 2>&1; then
+		json_add_double "$1" "$2"
+	else
+		# json_add_int emits an unquoted JSON number in older libubox builds;
+		# accepting a decimal token keeps this app usable on older OpenWrt.
+		json_add_int "$1" "$2"
+	fi
+}
+
+json_add_ip_array() {
+	key="$1"
+	values="$2"
+	json_add_array "$key"
+	for address in $values; do
+		[ -n "$address" ] && json_push_string "$address"
+	done
+	json_close_array
+}
+
+# Avoid iproute2-only -o output; the regular `ip addr` format is also
+# available on small BusyBox OpenWrt images.
+ipv4="$(ip -4 addr show 2>/dev/null | awk '$3 == "inet" {sub(/\/.*/, "", $4); if ($4 !~ /^127\./ && $4 !~ /^169\.254\./) print $4}' | tr '\n' ' ')"
+ipv6="$(ip -6 addr show 2>/dev/null | awk '$3 == "inet6" {sub(/\/.*/, "", $4); if ($4 != "::1" && tolower($4) !~ /^fe80:/) print $4}' | tr '\n' ' ')"
+
+json_init
+json_add_string 'agent_version' "$agent_version"
+json_add_string 'hostname' "$hostname"
+json_add_int 'timestamp' "$timestamp"
+json_add_object 'metrics'
+	json_add_object 'os'
+	json_add_string 'os' "$os_name"
+	json_add_string 'kernel' "$kernel"
+	json_add_string 'arch' "$arch"
+	json_add_int 'uptime' "$uptime"
+	json_add_ip_array 'ipv4' "$ipv4"
+	json_add_ip_array 'ipv6' "$ipv6"
+	json_close_object
+	json_add_object 'cpu'
+	json_add_number 'load1' "$load1"
+	json_add_number 'load5' "$load5"
+	json_add_number 'load15' "$load15"
+	json_add_number 'usage' "$cpu_usage"
+	json_close_object
+	json_add_object 'mem'
+	json_add_int 'total' "$mem_total"
+	json_add_int 'used' "$mem_used"
+	json_add_int 'available' "$mem_available"
+	json_add_number 'used_pct' "$mem_used_pct"
+	json_add_int 'swap_total' "$swap_total"
+	json_add_int 'swap_used' "$swap_used"
+	json_close_object
+json_close_object
+payload="$(json_dump)"
+
+response="$(curl --silent --show-error --fail --connect-timeout "$timeout" --max-time "$timeout" \
+	-H 'Content-Type: application/json' \
+	-H "Authorization: Bearer $api_key" \
+	-H "X-API-Key: $api_key" \
+	--data-binary "$payload" "$endpoint" 2>&1)"
+result=$?
+if [ "$result" -ne 0 ]; then
+	log_msg "push failed ($result): $response"
+	exit "$result"
+fi
+log_msg "push ok ($reason)"
+exit 0

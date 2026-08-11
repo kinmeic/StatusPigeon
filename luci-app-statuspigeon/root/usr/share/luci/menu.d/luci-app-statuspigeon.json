@@ -1,0 +1,14 @@
+{
+  "admin/services/statuspigeon": {
+    "title": "Status Pigeon",
+    "order": 90,
+    "action": {
+      "type": "view",
+      "path": "statuspigeon/config"
+    },
+    "depends": {
+      "acl": [ "luci-app-statuspigeon" ],
+      "uci": { "statuspigeon": true }
+    }
+  }
+}

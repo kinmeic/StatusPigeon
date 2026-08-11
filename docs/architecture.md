@@ -2,7 +2,9 @@
 
 ## 总体架构
 
-Status Pigeon 是一个 **push + pull 混合模型** 的轻量级服务器状态监控系统，由两部分组成：
+Status Pigeon 是一个 **push + pull 混合模型** 的轻量级服务器状态监控系统，由两部分组成。
+
+仓库同时提供两个适合受限环境的部署端：`hub-php/` 是 PHP 7.2 + SQLite 的无 rewrite Hub；`luci-app-statuspigeon/` 是 OpenWrt 的 push-only LuCI app。PHP Hub 在网页请求中顺带执行失联标记和数据清理，OpenWrt app 由 procd 定时器和 iface hotplug 事件驱动，不提供 listen 模式：
 
 ```
                         ┌─────────────────────────────────────────────┐
@@ -59,6 +61,8 @@ Agent 主动向 Hub 发起 HTTP POST 上报。**能穿透 NAT**，是家用机�
 | **Agent** | `agent/` | Go 二进制，双模式（push/listen），gopsutil 采集 |
 | **Hub** | `hub/` | Go 二进制：接收上报 + 主动拉取 + 存储 + API + 静态页 |
 | **前端** | `hub/assets/` | 静态 HTML/CSS/JS，embed 打包进 hub 单二进制 |
+| **PHP Hub** | `hub-php/` | PHP 7.2 接收 + SQLite 存储 + 直接文件 API + HTML 状态页 |
+| **OpenWrt app** | `luci-app-statuspigeon/` | LuCI JSON 菜单/ACL + UCI 配置 + shell JSON push |
 
 ## Hub 内部结构（hub/*.go）
 
@@ -105,6 +109,17 @@ Agent 主动向 Hub 发起 HTTP POST 上报。**能穿透 NAT**，是家用机�
 | `GET /api/status?days=90` | 全部主机 N 天聚合（色块条） |
 | `GET /api/metrics?id=&range=1h\|24h\|7d` | 单主机指标序列（趋势图） |
 | `GET /` | 状态页；`GET /host.html?id=` 详情页 |
+
+PHP Hub 的实际文件路径（不需要地址重写）：
+
+| 方法 路径 | 说明 |
+|-----------|------|
+| `POST /report/` 或 `/report/index.php` | 接收同一份 Report JSON |
+| `GET /api/hosts.php` | 主机列表 |
+| `GET /api/status.php?days=90` | 状态聚合 |
+| `GET /api/metrics.php?id=&range=24h` | 指标序列 |
+| `GET /index.php` | PHP 状态页 |
+| `GET /admin.php` | 管理页：登录、生成 API key、设置管理密码 |
 
 ## 关键设计决策
 

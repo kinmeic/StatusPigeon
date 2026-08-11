@@ -1,0 +1,11 @@
+{
+  "luci-app-statuspigeon": {
+    "description": "Status Pigeon agent configuration",
+    "read": {
+      "uci": [ "statuspigeon" ]
+    },
+    "write": {
+      "uci": [ "statuspigeon" ]
+    }
+  }
+}

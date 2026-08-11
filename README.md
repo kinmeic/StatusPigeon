@@ -19,7 +19,9 @@
 status-pigeon/
 ├── pkg/metrics/        # Agent 与 Hub 共享的指标类型
 ├── agent/              # 被监控端（push / listen 双模式）
-└── hub/                # 监控中心（接收 + 拉取 + 存储 + API + 状态页）
+├── hub/                # Go 监控中心（接收 + 拉取 + 存储 + API + 状态页）
+├── hub-php/            # PHP 7.2 + SQLite 监控中心（无 rewrite）
+└── luci-app-statuspigeon/ # OpenWrt LuCI push app（JSON + shell）
 ```
 
 ## 快速开始
@@ -49,7 +51,19 @@ cp config.example.yaml config.yaml
 
 打开 `http://<hub-ip>:9527/` 即可看到状态页。
 
-### 3. 部署 Agent
+### 3. 部署 PHP Hub（虚拟主机）
+
+如果虚拟主机只能运行 PHP 7.2，可直接部署 `hub-php/`：
+
+```bash
+cd hub-php
+cp config.example.php config.php
+# 编辑 config.php：设置 api_key，并让 db_path 指向 PHP 可写目录
+```
+
+将目录内容放到网站根目录后访问 `/index.php`，管理页面为 `/admin.php`。该版本不需要地址重写，接收地址为 `/report/` 或 `/report/index.php`，API 使用实际文件路径 `/api/status.php`、`/api/hosts.php`、`/api/metrics.php`。完整说明见 [`hub-php/README.md`](hub-php/README.md)。
+
+### 4. 部署 Agent
 
 **Push 模式**（默认，NAT 后机器）：
 
@@ -79,7 +93,7 @@ pull_targets:
     enabled: true
 ```
 
-### 4. 安装为系统服务
+### 5. 安装为系统服务
 
 二进制内置 `install` / `uninstall` 子命令，自动按当前平台生成对应服务配置并注册：
 
@@ -104,6 +118,21 @@ sudo ./dist/statuspigeon-hub    uninstall
 
 > OpenWrt 会自动识别（检测 `/etc/openwrt_release`），无需额外参数。
 > install 子命令选项：`-c` 指定配置文件路径（会转为绝对路径写入服务配置）、`-user` 指定运行用户（仅 systemd）、`-name` 指定服务名。
+
+### 6. 安装 OpenWrt LuCI app
+
+`luci-app-statuspigeon/` 是不带 listen 模式的 OpenWrt push app，使用 LuCI JSON 菜单/ACL、JavaScript 配置页和可执行 shell 上报脚本。它支持定时上报以及 `/etc/hotplug.d/iface/` 的 `ifup`/`ifupdate` 网络事件上报：
+
+```bash
+make package/luci-app-statuspigeon/compile V=s
+opkg install luci-app-statuspigeon_*.ipk
+/etc/init.d/statuspigeon enable
+/etc/init.d/statuspigeon start
+```
+
+在 LuCI 的“服务 → Status Pigeon”中设置目标地址与 API key。目标可以填 PHP Hub 的 `https://example.com/report/index.php`，也可以填 `/report/` 或 Hub 根地址，脚本会自动补全真实文件路径。详见 [`luci-app-statuspigeon/README.md`](luci-app-statuspigeon/README.md)。
+
+推送到 `main` 后，GitHub Actions 会自动生成两个可下载的构建 artifact：旧版 OpenWrt 的 `.ipk`，以及固定使用 OpenWrt 25.12.5 官方 SDK 构建的 `.apk`。也可以在 Actions 页面手动运行 `Build luci-app-statuspigeon`。
 
 ## 采集指标
 

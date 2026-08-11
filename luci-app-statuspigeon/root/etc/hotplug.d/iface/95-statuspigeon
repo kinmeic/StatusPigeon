@@ -1,0 +1,26 @@
+#!/bin/sh
+# A restored/updated WAN or LAN interface is a useful push trigger. The
+# short background delay lets DHCP/PPPoE finish before curl connects.
+
+action="${ACTION:-}"
+interface="${INTERFACE:-}"
+report_on_network="$(uci -q get statuspigeon.main.report_on_network 2>/dev/null || true)"
+
+[ "$report_on_network" = "1" ] || exit 0
+[ "$interface" != "loopback" ] || exit 0
+case "$action" in
+	ifup|ifupdate) ;;
+	*) exit 0 ;;
+esac
+
+delay="$(uci -q get statuspigeon.main.network_delay 2>/dev/null || true)"
+case "$delay" in
+	''|*[!0-9]*) delay=3 ;;
+esac
+
+(
+	sleep "$delay"
+	/usr/bin/statuspigeon-report network >/dev/null 2>&1
+) &
+
+exit 0

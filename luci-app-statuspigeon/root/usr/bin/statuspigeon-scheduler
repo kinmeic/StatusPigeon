@@ -1,0 +1,30 @@
+#!/bin/sh
+# Long-running timer only. The actual HTTP request and JSON construction live
+# in statuspigeon-report so iface hotplug can call exactly the same code.
+
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+last_report=0
+
+valid_interval() {
+	case "$1" in
+		''|*[!0-9]*) echo 300 ;;
+		0) echo 300 ;;
+		*) [ "$1" -lt 15 ] 2>/dev/null && echo 15 || echo "$1" ;;
+	esac
+}
+
+while :; do
+	enabled="$(uci -q get statuspigeon.main.enabled 2>/dev/null || true)"
+	if [ "$enabled" = "1" ]; then
+		now="$(date +%s)"
+		interval="$(valid_interval "$(uci -q get statuspigeon.main.interval 2>/dev/null || true)")"
+		if [ "$last_report" -eq 0 ] || [ $((now - last_report)) -ge "$interval" ]; then
+			/usr/bin/statuspigeon-report timer || true
+			last_report="$now"
+		fi
+	else
+		# When disabled from LuCI, send immediately if it is enabled again.
+		last_report=0
+	fi
+	sleep 15
+done

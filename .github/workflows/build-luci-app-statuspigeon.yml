@@ -1,0 +1,75 @@
+name: Build luci-app-statuspigeon
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'luci-app-statuspigeon/**'
+      - '.github/workflows/build-luci-app-statuspigeon.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.format }} (OpenWrt ${{ matrix.openwrt }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # OpenWrt 24.10 still uses the legacy .ipk package format.
+          - format: ipk
+            openwrt: 24.10.8
+            sdk_url: https://downloads.openwrt.org/releases/24.10.8/targets/x86/64/openwrt-sdk-24.10.8-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            sdk_sha256: ac4a0405d2eea821b06f93c14ba13ffa90ad0457648903df7dde02570027ab21
+          # OpenWrt 25.12 uses APK; keep this pinned to the requested release.
+          - format: apk
+            openwrt: 25.12.5
+            sdk_url: https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+            sdk_sha256: 0c8df0151a1e88feb7c03d694d61f6a18d51872815b7c811d76e2b77504d5e9c
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install SDK unpacking tools
+        run: sudo apt-get update && sudo apt-get install --yes zstd
+
+      - name: Download and verify OpenWrt SDK
+        env:
+          SDK_URL: ${{ matrix.sdk_url }}
+          SDK_SHA256: ${{ matrix.sdk_sha256 }}
+        run: |
+          set -eu
+          SDK_ARCHIVE="$RUNNER_TEMP/openwrt-sdk.tar.zst"
+          curl --fail --location --retry 3 --output "$SDK_ARCHIVE" "$SDK_URL"
+          printf '%s  %s\n' "$SDK_SHA256" "$SDK_ARCHIVE" | sha256sum --check --status
+          mkdir -p "$RUNNER_TEMP/openwrt-sdk"
+          tar --extract --zstd --file "$SDK_ARCHIVE" --strip-components=1 --directory "$RUNNER_TEMP/openwrt-sdk"
+
+      - name: Build package
+        working-directory: ${{ runner.temp }}/openwrt-sdk
+        env:
+          PACKAGE_NAME: luci-app-statuspigeon
+        run: |
+          set -eu
+          printf 'src-link statuspigeon %s\n' "$GITHUB_WORKSPACE" >> feeds.conf
+          ./scripts/feeds update statuspigeon
+          ./scripts/feeds install -p statuspigeon -f "$PACKAGE_NAME"
+          make defconfig
+          make package/$PACKAGE_NAME/download V=s
+          make package/$PACKAGE_NAME/check V=s
+          make package/$PACKAGE_NAME/compile V=s -j"$(nproc)"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/${{ matrix.format }}"
+          find bin/packages -type f -name "$PACKAGE_NAME*" -exec cp --target-directory="$GITHUB_WORKSPACE/artifacts/${{ matrix.format }}" {} +
+          test -n "$(find "$GITHUB_WORKSPACE/artifacts/${{ matrix.format }}" -type f -print -quit)"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-statuspigeon-${{ matrix.format }}-openwrt-${{ matrix.openwrt }}
+          path: artifacts/${{ matrix.format }}/
+          if-no-files-found: error
