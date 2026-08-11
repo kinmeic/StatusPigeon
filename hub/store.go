@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,12 +26,23 @@ type Store struct {
 // NewStore 打开数据库并建表。
 func NewStore(path string) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o775); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return nil, fmt.Errorf("创建数据目录: %w", err)
 		}
 	}
 	// modernc 驱动名 "sqlite"；busy_timeout 防并发锁等待失败。
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("解析数据库路径: %w", err)
+	}
+	dsnURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(absPath)}
+	query := dsnURL.Query()
+	query.Add("_pragma", "busy_timeout(5000)")
+	query.Add("_pragma", "journal_mode(WAL)")
+	query.Add("_pragma", "synchronous(NORMAL)")
+	query.Add("_pragma", "foreign_keys(ON)")
+	dsnURL.RawQuery = query.Encode()
+	dsn := dsnURL.String()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库: %w", err)
@@ -40,12 +52,45 @@ func NewStore(path string) (*Store, error) {
 
 	s := &Store{db: db}
 	if err := s.createSchema(); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 	if err := s.migrateHostIdentity(); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
+	if err := s.ensureMetricUniqueness(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	_ = os.Chmod(absPath, 0o640)
 	return s, nil
+}
+
+func (s *Store) ensureMetricUniqueness() error {
+	if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_raw_host_ts_unique`); err != nil {
+		return fmt.Errorf("移除过严的旧指标索引: %w", err)
+	}
+	var exists int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master
+		WHERE type='index' AND name='idx_raw_host_ts_payload_unique'`).Scan(&exists); err != nil {
+		return fmt.Errorf("检查指标唯一索引: %w", err)
+	}
+	if exists > 0 {
+		return nil
+	}
+	// Older versions accepted a retry as a new sample. Keep the oldest raw
+	// record for each identical host/timestamp/payload before enforcing
+	// idempotency in SQLite.
+	if _, err := s.db.Exec(`DELETE FROM metrics_raw
+		WHERE id NOT IN (SELECT MIN(id) FROM metrics_raw GROUP BY host_id, ts, payload)`); err != nil {
+		return fmt.Errorf("清理重复指标: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_host_ts_payload_unique
+		ON metrics_raw(host_id, ts, payload)`); err != nil {
+		return fmt.Errorf("创建指标唯一索引: %w", err)
+	}
+	return nil
 }
 
 // Close 关闭数据库。
@@ -72,7 +117,11 @@ func (s *Store) migrateHostIdentity() error {
 		return err
 	}
 	hasDeviceID := columns["device_id"]
-	if hasDeviceID && !s.hostsHaveUniqueHostname() {
+	hasUniqueHostname, err := s.hostsHaveUniqueHostname()
+	if err != nil {
+		return err
+	}
+	if hasDeviceID && !hasUniqueHostname {
 		return nil
 	}
 
@@ -151,38 +200,62 @@ func (s *Store) hostColumns() (map[string]bool, error) {
 	return columns, rows.Err()
 }
 
-func (s *Store) hostsHaveUniqueHostname() bool {
+func (s *Store) hostsHaveUniqueHostname() (bool, error) {
 	rows, err := s.db.Query(`PRAGMA index_list(hosts)`)
 	if err != nil {
-		return false
+		return false, err
 	}
-	defer rows.Close()
+	var uniqueIndexes []string
 	for rows.Next() {
 		var seq int
 		var name string
 		var unique int
 		var origin, partial string
-		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil || unique == 0 {
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			rows.Close()
+			return false, err
+		}
+		if unique == 0 {
 			continue
 		}
+		uniqueIndexes = append(uniqueIndexes, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+
+	// Close index_list before issuing another query. The Store intentionally
+	// has one SQLite connection, so nested PRAGMA queries would otherwise wait
+	// for that same connection and can deadlock during startup migration.
+	for _, name := range uniqueIndexes {
 		indexRows, err := s.db.Query(`PRAGMA index_info(` + quoteSQLiteIdentifier(name) + `)`)
 		if err != nil {
-			continue
+			return false, err
 		}
 		var columns []string
 		for indexRows.Next() {
 			var seqno, cid int
 			var column string
-			if indexRows.Scan(&seqno, &cid, &column) == nil {
-				columns = append(columns, column)
+			if err := indexRows.Scan(&seqno, &cid, &column); err != nil {
+				indexRows.Close()
+				return false, err
 			}
+			columns = append(columns, column)
+		}
+		if err := indexRows.Err(); err != nil {
+			indexRows.Close()
+			return false, err
 		}
 		indexRows.Close()
 		if len(columns) == 1 && columns[0] == "hostname" {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func quoteSQLiteIdentifier(value string) string {
@@ -262,6 +335,14 @@ func (s *Store) Ingest(r *pkgmetrics.Report, source, status string) error {
 	}
 	defer tx.Rollback()
 
+	duplicate, err := reportAlreadyStored(tx, r)
+	if err != nil {
+		return fmt.Errorf("check duplicate report: %w", err)
+	}
+	if duplicate {
+		return tx.Commit()
+	}
+
 	hostID, err := upsertHost(tx, r, source)
 	if err != nil {
 		return fmt.Errorf("upsert host: %w", err)
@@ -269,13 +350,34 @@ func (s *Store) Ingest(r *pkgmetrics.Report, source, status string) error {
 	if err := setHostLive(tx, hostID, status, r); err != nil {
 		return fmt.Errorf("set host live: %w", err)
 	}
-	if err := insertMetrics(tx, hostID, r); err != nil {
+	inserted, err := insertMetrics(tx, hostID, r)
+	if err != nil {
 		return fmt.Errorf("insert metrics: %w", err)
 	}
-	if err := updateDailyAgg(tx, hostID, r.Timestamp, status); err != nil {
-		return fmt.Errorf("update daily: %w", err)
+	if inserted {
+		if err := updateDailyAgg(tx, hostID, r.Timestamp, status); err != nil {
+			return fmt.Errorf("update daily: %w", err)
+		}
 	}
 	return tx.Commit()
+}
+
+func reportAlreadyStored(run sqlRunner, r *pkgmetrics.Report) (bool, error) {
+	payload, err := jsonMarshal(r)
+	if err != nil {
+		return false, err
+	}
+	var id int64
+	err = run.QueryRow(
+		`SELECT metrics_raw.id FROM metrics_raw
+		 INNER JOIN hosts ON hosts.id=metrics_raw.host_id
+		 WHERE hosts.device_id=? AND metrics_raw.ts=? AND metrics_raw.payload=? LIMIT 1`,
+		reportDeviceID(r), r.Timestamp, payload,
+	).Scan(&id)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // upsertHost 创建或更新主机记录，返回 host_id。DeviceID 是唯一身份键，
@@ -352,21 +454,25 @@ func setHostLive(run sqlRunner, hostID int64, status string, r *pkgmetrics.Repor
 }
 
 // insertMetrics 写入原始指标。
-func insertMetrics(run sqlRunner, hostID int64, r *pkgmetrics.Report) error {
+func insertMetrics(run sqlRunner, hostID int64, r *pkgmetrics.Report) (bool, error) {
 	// cpu_usage is a legacy column retained for non-destructive migrations.
 	// New reports intentionally leave it NULL because CPU percentage is no
 	// longer sampled or transmitted.
 	var cpu interface{}
 	mem, load1 := r.Metrics.Mem.UsedPct, r.Metrics.Cpu.Load1
 	payload, _ := jsonMarshal(r)
-	_, err := run.Exec(
-		`INSERT INTO metrics_raw
+	result, err := run.Exec(
+		`INSERT OR IGNORE INTO metrics_raw
 		 (host_id, ts, cpu_usage, mem_usage, load1, payload)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		hostID, r.Timestamp, cpu, mem, load1,
 		payload,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows > 0, err
 }
 
 // updateDailyAgg 更新某主机当天聚合。
@@ -393,11 +499,11 @@ func updateDailyAgg(run sqlRunner, hostID int64, ts int64, status string) error 
 
 // recomputeDaily 根据当天样本重算 status/uptime_pct。
 func recomputeDaily(run sqlRunner, hostID int64, date string) error {
-	var total, degraded int
+	var total, degraded, down int
 	err := run.QueryRow(
-		`SELECT total_samples, degraded_samples FROM uptime_daily WHERE host_id=? AND date=?`,
+		`SELECT total_samples, degraded_samples, down_samples FROM uptime_daily WHERE host_id=? AND date=?`,
 		hostID, date,
-	).Scan(&total, &degraded)
+	).Scan(&total, &degraded, &down)
 	if err != nil || total == 0 {
 		return err
 	}
@@ -405,8 +511,11 @@ func recomputeDaily(run sqlRunner, hostID int64, date string) error {
 	if degraded > 0 {
 		dayStatus = statusDegraded
 	}
-	// uptime_pct = 非降级样本占比。
-	uptime := float64(total-degraded) / float64(total) * 100.0
+	if down > 0 {
+		dayStatus = statusDown
+	}
+	// uptime_pct = 既未降级也未离线的样本占比。
+	uptime := float64(max(0, total-degraded-down)) / float64(total) * 100.0
 	_, err = run.Exec(
 		`UPDATE uptime_daily SET status=?, uptime_pct=? WHERE host_id=? AND date=?`,
 		dayStatus, uptime, hostID, date,
@@ -437,7 +546,10 @@ func (s *Store) MarkOffline(thresholdTs int64) (int, error) {
 	var hosts []offlineHost
 	for rows.Next() {
 		var h offlineHost
-		_ = rows.Scan(&h.id, &h.status)
+		if err := rows.Scan(&h.id, &h.status); err != nil {
+			rows.Close()
+			return 0, err
+		}
 		hosts = append(hosts, h)
 	}
 	rows.Close()
@@ -460,7 +572,9 @@ func (s *Store) MarkOffline(thresholdTs int64) (int, error) {
 			`INSERT INTO uptime_daily (host_id, date, status, uptime_pct, total_samples, degraded_samples, down_samples)
 			 VALUES (?, ?, ?, 0, 1, 0, 1)
 			 ON CONFLICT(host_id, date) DO UPDATE SET
-			    down_samples = uptime_daily.down_samples + 1, status = ?`,
+			    status = ?, uptime_pct = 0,
+			    total_samples = CASE WHEN uptime_daily.down_samples < 1 THEN uptime_daily.total_samples + 1 ELSE uptime_daily.total_samples END,
+			    down_samples = CASE WHEN uptime_daily.down_samples < 1 THEN 1 ELSE uptime_daily.down_samples END`,
 			h.id, date, statusDown, statusDown,
 		); err != nil {
 			return newly, err
@@ -514,6 +628,9 @@ func (s *Store) DailyStatus(hostID int64, days int) ([]DailyPoint, error) {
 			return nil, err
 		}
 		byDate[d.Date] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	// 填充缺失天为 no-data。
@@ -611,18 +728,27 @@ func boolToInt(b bool) int {
 
 // hostSummary 生成状态页徽章用的精简摘要 JSON。
 func hostSummary(m pkgmetrics.Metrics) string {
-	mem, load1 := m.Mem.UsedPct, m.Cpu.Load1
-	return fmt.Sprintf(`{"mem":%.1f,"load1":%.2f,"uptime":%d,"os":%q,"os_version":%q,"cpu_model":%q,"memory_total":%d,"disk_total":%d,"disk_used_pct":%.1f,"ipv4":%s,"ipv6":%s}`,
-		mem, load1, m.Os.Uptime, m.Os.Os, m.Os.Version, m.Os.CPUModel,
-		m.Os.MemoryTotal, m.Os.DiskTotal, m.Os.DiskUsedPct,
-		jsonMarshalString(m.Os.IPv4), jsonMarshalString(m.Os.IPv6))
-}
-
-// jsonMarshalString 序列化为 JSON 文本（用于嵌入摘要），失败返回 "null"。
-func jsonMarshalString(v interface{}) string {
-	b, err := json.Marshal(v)
+	summary := struct {
+		Mem         float64  `json:"mem"`
+		Load1       float64  `json:"load1"`
+		Uptime      uint64   `json:"uptime"`
+		OS          string   `json:"os"`
+		OSVersion   string   `json:"os_version"`
+		CPUModel    string   `json:"cpu_model"`
+		MemoryTotal uint64   `json:"memory_total"`
+		DiskTotal   uint64   `json:"disk_total"`
+		DiskUsedPct float64  `json:"disk_used_pct"`
+		IPv4        []string `json:"ipv4"`
+		IPv6        []string `json:"ipv6"`
+	}{
+		Mem: m.Mem.UsedPct, Load1: m.Cpu.Load1, Uptime: m.Os.Uptime,
+		OS: m.Os.Os, OSVersion: m.Os.Version, CPUModel: m.Os.CPUModel,
+		MemoryTotal: m.Os.MemoryTotal, DiskTotal: m.Os.DiskTotal,
+		DiskUsedPct: m.Os.DiskUsedPct, IPv4: m.Os.IPv4, IPv6: m.Os.IPv6,
+	}
+	b, err := json.Marshal(summary)
 	if err != nil {
-		return "null"
+		return "{}"
 	}
 	return string(b)
 }

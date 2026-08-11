@@ -10,6 +10,10 @@ return array(
     // Must match the Authorization: Bearer ... value used by an agent.
     'api_key' => 'change-me-to-a-long-random-secret',
 
+	// Secure default: an empty api_key rejects reports. Set this to true only
+	// for an isolated development network that deliberately has no auth.
+	'allow_unauthenticated_reports' => false,
+
     // Optional independent admin password hash.  If empty, the current
     // api_key is accepted as the first admin credential.  The admin page can
     // create this hash after the first login.

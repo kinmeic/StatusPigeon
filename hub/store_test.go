@@ -49,8 +49,10 @@ func TestUpsertHostIDStability(t *testing.T) {
 	hosts := []string{"web-1", "web-2"}
 	ids := map[string]int64{}
 	for round := 0; round < 5; round++ {
-		for _, h := range hosts {
-			if err := Ingest(s, judge, newTestReport(h, 10), "push"); err != nil {
+		for hostIndex, h := range hosts {
+			report := newTestReport(h, 10)
+			report.Timestamp += int64(round*len(hosts) + hostIndex)
+			if err := Ingest(s, judge, report, "push"); err != nil {
 				t.Fatalf("round %d host %s ingest: %v", round, h, err)
 			}
 			var id int64
@@ -84,7 +86,8 @@ func TestMarkOfflineAndRecover(t *testing.T) {
 	defer s.Close()
 
 	judge := &Judge{CPUThreshold: 90, MemThreshold: 95}
-	if err := Ingest(s, judge, newTestReport("db-1", 10), "push"); err != nil {
+	initial := newTestReport("db-1", 10)
+	if err := Ingest(s, judge, initial, "push"); err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
 
@@ -108,10 +111,19 @@ func TestMarkOfflineAndRecover(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("重复扫描新标记=%d，期望 0", n)
 	}
+	var downSamples int
+	if err := s.db.QueryRow(`SELECT down_samples FROM uptime_daily WHERE host_id=1 AND date=?`, time.Now().Format("2006-01-02")).Scan(&downSamples); err != nil {
+		t.Fatalf("read down samples: %v", err)
+	}
+	if downSamples != 1 {
+		t.Fatalf("重复扫描后 down_samples=%d，期望 1", downSamples)
+	}
 
 	// 恢复上报：状态回到 operational，last_seen 刷新为服务端时间。
 	before := time.Now().Unix()
-	if err := Ingest(s, judge, newTestReport("db-1", 10), "push"); err != nil {
+	recovery := newTestReport("db-1", 10)
+	recovery.Timestamp = initial.Timestamp + 1
+	if err := Ingest(s, judge, recovery, "push"); err != nil {
 		t.Fatalf("recover ingest: %v", err)
 	}
 	var lastSeen int64
@@ -121,6 +133,42 @@ func TestMarkOfflineAndRecover(t *testing.T) {
 	}
 	if lastSeen < before {
 		t.Fatalf("last_seen=%d 未刷新到服务端时间 (>=%d)", lastSeen, before)
+	}
+	var dayStatus string
+	var totalSamples int
+	if err := s.db.QueryRow(`SELECT status, total_samples, down_samples FROM uptime_daily WHERE host_id=1 AND date=?`, time.Now().Format("2006-01-02")).Scan(&dayStatus, &totalSamples, &downSamples); err != nil {
+		t.Fatalf("read recovered daily status: %v", err)
+	}
+	if dayStatus != statusDown || totalSamples != 3 || downSamples != 1 {
+		t.Fatalf("recovered daily status=%s total=%d down=%d, want down/3/1", dayStatus, totalSamples, downSamples)
+	}
+}
+
+func TestDuplicateReportIsIdempotent(t *testing.T) {
+	s, err := NewStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer s.Close()
+
+	judge := &Judge{CPUThreshold: 90, MemThreshold: 95}
+	report := newDeviceReport("device-a", "router", 10)
+	if err := Ingest(s, judge, report, "push"); err != nil {
+		t.Fatalf("first ingest: %v", err)
+	}
+	if err := Ingest(s, judge, report, "push"); err != nil {
+		t.Fatalf("duplicate ingest: %v", err)
+	}
+
+	var metrics, samples int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM metrics_raw`).Scan(&metrics); err != nil {
+		t.Fatalf("count metrics: %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT total_samples FROM uptime_daily`).Scan(&samples); err != nil {
+		t.Fatalf("read daily samples: %v", err)
+	}
+	if metrics != 1 || samples != 1 {
+		t.Fatalf("duplicate produced metrics=%d samples=%d, want 1/1", metrics, samples)
 	}
 }
 

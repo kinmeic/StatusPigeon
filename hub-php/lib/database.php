@@ -18,6 +18,9 @@ function statuspigeon_db($config)
     $pdo = new PDO('sqlite:' . $path);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+	if (is_file($path)) {
+		@chmod($path, 0640);
+	}
     $pdo->exec('PRAGMA busy_timeout=5000');
     $pdo->exec('PRAGMA foreign_keys=ON');
     // WAL is useful on shared hosting where the status page is read while an
@@ -75,10 +78,30 @@ function statuspigeon_db($config)
     }
     statuspigeon_migrate_host_identity($pdo);
     statuspigeon_ensure_host_remote_ip($pdo);
+	statuspigeon_ensure_metric_uniqueness($pdo);
     // Existing databases may still contain legacy I/O columns.  They are
     // intentionally left in place for non-destructive upgrades, but no new
     // report reads or writes those columns.
     return $pdo;
+}
+
+function statuspigeon_ensure_metric_uniqueness($pdo)
+{
+	$indexes = $pdo->query('PRAGMA index_list(metrics_raw)')->fetchAll();
+	foreach ($indexes as $index) {
+		if (isset($index['name']) && $index['name'] === 'idx_raw_host_ts_payload_unique') {
+			return;
+		}
+	}
+	$pdo->exec('DROP INDEX IF EXISTS idx_raw_host_ts_unique');
+	$pdo->exec(
+		'DELETE FROM metrics_raw
+		 WHERE id NOT IN (SELECT MIN(id) FROM metrics_raw GROUP BY host_id, ts, payload)'
+	);
+	$pdo->exec(
+		'CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_host_ts_payload_unique
+		 ON metrics_raw(host_id, ts, payload)'
+	);
 }
 
 function statuspigeon_migrate_host_identity($pdo)
@@ -272,7 +295,9 @@ function statuspigeon_host_ip_list($values, $remoteIp, $family)
         if (!isset($seen[$key])) {
             // The actual network interface is unknown to the Hub. @hub marks
             // a public address observed through the Hub/proxy chain.
-            array_unshift($out, $remoteIp . '@hub');
+			// Preserve the agent's WAN-first interface ordering. The Hub-observed
+			// address is a fallback observation and belongs at the end.
+			$out[] = $remoteIp . '@hub';
         }
     }
     return $out;
@@ -333,6 +358,84 @@ function statuspigeon_normalize_report($input)
     );
 }
 
+function statuspigeon_validate_string_field($name, $value, $max, $required)
+{
+	$value = (string) $value;
+	if ($required && trim($value) === '') {
+		return $name . ' is required';
+	}
+	if (strlen($value) > (int) $max) {
+		return $name . ' is too long';
+	}
+	if (preg_match('//u', $value) !== 1) {
+		return $name . ' is not valid UTF-8';
+	}
+	if (preg_match('/[\x00-\x1F\x7F]/', $value)) {
+		return $name . ' contains control characters';
+	}
+	return '';
+}
+
+function statuspigeon_validate_ip_list($name, $values, $family)
+{
+	if (!is_array($values) || count($values) > 64) {
+		return $name . ' has too many entries';
+	}
+	foreach ($values as $value) {
+		$error = statuspigeon_validate_string_field($name, $value, 192, false);
+		if ($error !== '') {
+			return $error;
+		}
+		$address = statuspigeon_ip_address_part($value);
+		$flag = (int) $family === 6 ? FILTER_FLAG_IPV6 : FILTER_FLAG_IPV4;
+		if (filter_var($address, FILTER_VALIDATE_IP, $flag) === false) {
+			return $name . ' contains an invalid address';
+		}
+	}
+	return '';
+}
+
+/** Validate normalized, untrusted Report fields. Returns an empty string on success. */
+function statuspigeon_validate_report($report)
+{
+	$checks = array(
+		array('hostname', $report['hostname'], 255, true),
+		array('device_id', $report['device_id'], 512, false),
+		array('agent_version', $report['agent_version'], 128, false),
+		array('metrics.os.os', $report['metrics']['os']['os'], 512, false),
+		array('metrics.os.version', $report['metrics']['os']['version'], 512, false),
+		array('metrics.os.kernel', $report['metrics']['os']['kernel'], 512, false),
+		array('metrics.os.arch', $report['metrics']['os']['arch'], 512, false),
+		array('metrics.os.cpu_model', $report['metrics']['os']['cpu_model'], 512, false),
+	);
+	foreach ($checks as $check) {
+		$error = statuspigeon_validate_string_field($check[0], $check[1], $check[2], $check[3]);
+		if ($error !== '') {
+			return $error;
+		}
+	}
+	$percentages = array(
+		'metrics.mem.used_pct' => $report['metrics']['mem']['used_pct'],
+		'metrics.os.disk_used_pct' => $report['metrics']['os']['disk_used_pct'],
+	);
+	foreach ($percentages as $name => $value) {
+		if ($value !== null && ((float) $value < 0 || (float) $value > 100)) {
+			return $name . ' is out of range';
+		}
+	}
+	foreach (array('load1', 'load5', 'load15') as $field) {
+		$value = (float) $report['metrics']['cpu'][$field];
+		if ($value < 0 || $value > 1000000) {
+			return 'metrics.cpu.' . $field . ' is out of range';
+		}
+	}
+	$error = statuspigeon_validate_ip_list('metrics.os.ipv4', $report['metrics']['os']['ipv4'], 4);
+	if ($error !== '') {
+		return $error;
+	}
+	return statuspigeon_validate_ip_list('metrics.os.ipv6', $report['metrics']['os']['ipv6'], 6);
+}
+
 function statuspigeon_report_device_id($report)
 {
     $deviceID = isset($report['device_id']) ? trim((string) $report['device_id']) : '';
@@ -369,6 +472,20 @@ function statuspigeon_summary($metrics)
         'ipv6' => $metrics['os']['ipv6'],
     );
     return json_encode($summary, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+function statuspigeon_public_summary($rawSummary)
+{
+	$summary = json_decode((string) $rawSummary, true);
+	if (!is_array($summary)) {
+		return '{}';
+	}
+	$public = array(
+		'mem' => isset($summary['mem']) ? (float) $summary['mem'] : 0.0,
+		'load1' => isset($summary['load1']) ? (float) $summary['load1'] : 0.0,
+		'os' => isset($summary['os']) ? (string) $summary['os'] : '',
+	);
+	return statuspigeon_json_encode($public);
 }
 
 function statuspigeon_json_encode($value)
@@ -444,12 +561,29 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
             throw new RuntimeException('Unable to create host record');
         }
 
+		// Retries with the same host/timestamp are idempotent. Without this,
+		// network retries inflate daily sample counts and distort uptime.
+		$findMetric = $pdo->prepare(
+			'SELECT id FROM metrics_raw
+			 WHERE host_id=:host_id AND ts=:ts AND payload=:payload LIMIT 1'
+		);
+		$findMetric->execute(array(
+			':host_id' => $hostId,
+			':ts' => $report['timestamp'],
+			':payload' => $payload,
+		));
+		if ($findMetric->fetchColumn() !== false) {
+			$pdo->commit();
+			return $hostId;
+		}
+
         $updateHost = $pdo->prepare(
-            'UPDATE hosts SET agent_version=:agent_version, os=:os, kernel=:kernel,
+			'UPDATE hosts SET hostname=:hostname, agent_version=:agent_version, os=:os, kernel=:kernel,
              arch=:arch, remote_ip=:remote_ip, last_seen=:last_seen, last_status=:last_status,
              last_summary=:last_summary, source=:source WHERE id=:id'
         );
         $updateHost->execute(array(
+			':hostname' => $report['hostname'],
             ':agent_version' => $report['agent_version'],
             ':os' => $metrics['os']['os'],
             ':kernel' => $metrics['os']['kernel'],
@@ -463,7 +597,7 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
         ));
 
         $insertMetric = $pdo->prepare(
-            'INSERT INTO metrics_raw
+			'INSERT OR IGNORE INTO metrics_raw
              (host_id, ts, cpu_usage, mem_usage, load1, payload)
              VALUES (:host_id, :ts, :cpu, :mem, :load1, :payload)'
         );
@@ -479,7 +613,7 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
         ));
 
         $findDaily = $pdo->prepare(
-            'SELECT total_samples, degraded_samples FROM uptime_daily
+		'SELECT total_samples, degraded_samples, down_samples FROM uptime_daily
              WHERE host_id=:host_id AND date=:date'
         );
         $findDaily->execute(array(':host_id' => $hostId, ':date' => $date));
@@ -523,7 +657,7 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
 function statuspigeon_recompute_daily($pdo, $hostId, $date)
 {
     $stmt = $pdo->prepare(
-        'SELECT total_samples, degraded_samples FROM uptime_daily
+		'SELECT total_samples, degraded_samples, down_samples FROM uptime_daily
          WHERE host_id=:host_id AND date=:date'
     );
     $stmt->execute(array(':host_id' => $hostId, ':date' => $date));
@@ -531,10 +665,14 @@ function statuspigeon_recompute_daily($pdo, $hostId, $date)
     if (!$row || (int) $row['total_samples'] <= 0) {
         return;
     }
-    $total = (int) $row['total_samples'];
-    $degraded = (int) $row['degraded_samples'];
-    $status = $degraded > 0 ? 'degraded' : 'operational';
-    $uptime = ($total - $degraded) / $total * 100.0;
+	$total = (int) $row['total_samples'];
+	$degraded = (int) $row['degraded_samples'];
+	$down = (int) $row['down_samples'];
+	$status = $degraded > 0 ? 'degraded' : 'operational';
+	if ($down > 0) {
+		$status = 'down';
+	}
+	$uptime = max(0, $total - $degraded - $down) / $total * 100.0;
     $update = $pdo->prepare(
         'UPDATE uptime_daily SET status=:status, uptime_pct=:uptime
          WHERE host_id=:host_id AND date=:date'
@@ -556,8 +694,9 @@ function statuspigeon_maintenance($pdo, $config)
     }
     $done = true;
 
-    $period = max(1, (int) $config['report_interval'])
-        * max(1, (int) $config['offline_periods']);
+	$reportInterval = min(2592000, max(1, (int) $config['report_interval']));
+	$offlinePeriods = min(1000, max(1, (int) $config['offline_periods']));
+	$period = $reportInterval * $offlinePeriods;
     $threshold = time() - $period;
     $pdo->beginTransaction();
     try {
@@ -581,7 +720,7 @@ function statuspigeon_maintenance($pdo, $config)
             $insert->execute(array(':host_id' => (int) $host['id'], ':date' => $today));
             $mark = $pdo->prepare(
                 'UPDATE uptime_daily SET status=\'down\', uptime_pct=0,
-                 total_samples=CASE WHEN total_samples < 1 THEN 1 ELSE total_samples END,
+				 total_samples=CASE WHEN down_samples < 1 THEN total_samples + 1 ELSE total_samples END,
                  down_samples=CASE WHEN down_samples < 1 THEN 1 ELSE down_samples END
                  WHERE host_id=:host_id AND date=:date'
             );
@@ -595,7 +734,7 @@ function statuspigeon_maintenance($pdo, $config)
         error_log('Status Pigeon offline maintenance failed: ' . $e->getMessage());
     }
 
-    $retention = max(1, (int) $config['retention_days']);
+	$retention = min(36500, max(1, (int) $config['retention_days']));
     $cutoff = time() - ($retention * 86400);
     $cutoffDate = date('Y-m-d', $cutoff);
     try {

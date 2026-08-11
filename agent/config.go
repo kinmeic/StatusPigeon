@@ -6,7 +6,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -32,7 +32,8 @@ type Config struct {
 	Interval  int    `yaml:"interval"`   // 上报间隔（秒），默认 300
 
 	// listen 模式
-	ListenAddr string `yaml:"listen_addr"` // 监听地址，如 :9527
+	ListenAddr                 string `yaml:"listen_addr"` // 监听地址，如 :9527
+	AllowUnauthenticatedListen bool   `yaml:"allow_unauthenticated_listen"`
 }
 
 // loadConfig 从 path 读取 YAML，再以环境变量覆盖，最后补默认值。
@@ -68,6 +69,11 @@ func loadConfig(path string) (*Config, error) {
 	if v := os.Getenv("STATUSPIGEON_LISTEN_ADDR"); v != "" {
 		cfg.ListenAddr = v
 	}
+	if v := os.Getenv("STATUSPIGEON_ALLOW_UNAUTHENTICATED_LISTEN"); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.AllowUnauthenticatedListen = enabled
+		}
+	}
 
 	// 默认值与校验。
 	if cfg.Mode == "" {
@@ -80,12 +86,23 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 300
 	}
-	cfg.ServerURL = strings.TrimRight(strings.TrimSpace(cfg.ServerURL), "/")
+	if cfg.Interval > 86400 {
+		return nil, fmt.Errorf("interval 不能超过 86400 秒")
+	}
+	// Preserve a trailing slash: PHP virtual hosts commonly receive at
+	// /report/ and may redirect /report in a way that changes POST semantics.
+	cfg.ServerURL = strings.TrimSpace(cfg.ServerURL)
+	cfg.Token = strings.TrimSpace(cfg.Token)
+	cfg.Hostname = strings.TrimSpace(cfg.Hostname)
 
 	switch cfg.Mode {
 	case ModePush:
 		if cfg.ServerURL == "" {
 			return nil, fmt.Errorf("push 模式需配置 server_url")
+		}
+		parsed, err := url.Parse(cfg.ServerURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return nil, fmt.Errorf("server_url 必须是有效的 http 或 https 地址")
 		}
 		if cfg.Token == "" {
 			return nil, fmt.Errorf("push 模式需配置 token")
@@ -94,8 +111,8 @@ func loadConfig(path string) (*Config, error) {
 		if cfg.ListenAddr == "" {
 			cfg.ListenAddr = ":9527"
 		}
-		if cfg.Token == "" {
-			log.Println("警告: listen 模式未配置 token，/metrics 将无鉴权公开（公网暴露务必配置）")
+		if cfg.Token == "" && !cfg.AllowUnauthenticatedListen {
+			return nil, fmt.Errorf("listen 模式需配置 token；仅隔离开发环境可显式设置 allow_unauthenticated_listen: true")
 		}
 	}
 	return cfg, nil

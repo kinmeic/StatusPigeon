@@ -16,6 +16,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
+	"unicode"
+)
+
+var (
+	serviceNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	serviceUserPattern = regexp.MustCompile(`^[A-Za-z0-9_.@-]{1,128}$`)
 )
 
 // ServiceInfo 描述一个待安装/卸载的服务。
@@ -43,6 +51,10 @@ func RunInstall(info ServiceInfo) {
 	info.Name = *name
 	info.User = *user
 	info.ConfigPath = *configPath
+	if err := validateServiceInfo(info); err != nil {
+		fmt.Fprintf(os.Stderr, "安装失败: %v\n", err)
+		os.Exit(1)
+	}
 
 	// 转绝对路径，确保系统服务（CWD 不同）能找到。
 	if info.ConfigPath != "" {
@@ -67,12 +79,29 @@ func RunUninstall(info ServiceInfo) {
 		os.Exit(2)
 	}
 	info.Name = *name
+	if !serviceNamePattern.MatchString(info.Name) {
+		fmt.Fprintln(os.Stderr, "卸载失败: 服务名只能包含字母、数字、点、下划线和连字符")
+		os.Exit(1)
+	}
 
 	if err := uninstall(info); err != nil {
 		fmt.Fprintf(os.Stderr, "卸载失败: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("服务 %s 已卸载。\n", info.Name)
+}
+
+func validateServiceInfo(info ServiceInfo) error {
+	if !serviceNamePattern.MatchString(info.Name) {
+		return fmt.Errorf("服务名只能包含字母、数字、点、下划线和连字符")
+	}
+	if info.User != "" && !serviceUserPattern.MatchString(info.User) {
+		return fmt.Errorf("运行用户包含不允许的字符")
+	}
+	if strings.IndexFunc(info.ConfigPath, unicode.IsControl) >= 0 {
+		return fmt.Errorf("配置文件路径包含控制字符")
+	}
+	return nil
 }
 
 // buildArgs 组装服务的启动参数。当前仅 -c <config>。

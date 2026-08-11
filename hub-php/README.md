@@ -18,7 +18,7 @@ POST /report/
 POST /report/index.php
 ```
 
-请求头支持 `Authorization: Bearer <api_key>` 和 `X-API-Key: <api_key>`。请求体就是 Go agent 使用的 JSON `Report`，时间戳允许服务器时间前后 5 分钟。每次接收时，Hub 会尝试记录公网服务端观察地址，并与 agent 上报的 IPv4/IPv6 合并、按 IP 去重，在详情页按 `IP@接口` 格式显示。若 PHP 位于内网反向代理之后，Hub 只在直接连接地址为内网时读取常见的 `X-Forwarded-For`、`X-Real-IP` 或 `CF-Connecting-IP`；没有可确认的公网地址时不会显示错误的 `@hub` 内网地址。
+请求头支持 `Authorization: Bearer <api_key>` 和 `X-API-Key: <api_key>`，并要求 `Content-Type: application/json`。请求体就是 Go agent 使用的 JSON `Report`，时间戳允许服务器时间前后 5 分钟；内容完全相同的网络重试不会重复累计统计。`api_key` 为空时默认拒绝接收，只有隔离开发环境才应显式设置 `allow_unauthenticated_reports => true`。每次接收时，Hub 会尝试记录公网服务端观察地址，并与 agent 上报的 IPv4/IPv6 合并、按 IP 去重，在详情页按 `IP@接口` 格式显示。若 PHP 位于内网反向代理之后，Hub 只在直接连接地址为内网时读取常见的 `X-Forwarded-For`、`X-Real-IP` 或 `CF-Connecting-IP`；解析 `X-Forwarded-For` 时从代理链末端选择公网地址，避免采用客户端可伪造的最左值。没有可确认的公网地址时不会显示错误的 `@hub` 内网地址。
 
 ## 直接文件 API
 
@@ -26,14 +26,14 @@ POST /report/index.php
 
 | 路径 | 作用 |
 |---|---|
-| `/api/hosts.php` | 主机列表 |
+| `/api/hosts.php` | 完整主机列表（需管理会话） |
 | `/api/status.php?days=60` | 状态页与日聚合（桌面 60 天，移动端 30 天） |
 | `/api/metrics.php?id=1&range=24h` | 单主机趋势数据 |
 | `/api/index.php?resource=status` | 可选的单文件 API 入口 |
 
 PHP 没有后台进程，因此每次请求会顺带执行失联标记和保留期清理。默认规则是内存超过 95% 标记 `degraded`，超过 3 个 5 分钟周期没有上报标记 `down`。CPU 使用率不再采集、传输或参与状态判定。
 
-主机详情页 `host.php?id=...` 与趋势接口需要先在 `admin.php` 登录；状态总览和状态 API 保持公开。详情页使用左宽右窄布局，左侧按“系统负载、内存、磁盘占用率”展示趋势，右侧展示 CPU 型号、内存/磁盘大小、合并后的 IP 列表和最近接收时间。Hub 按 `device_id` 识别设备，Hostname 仅作显示名；CPU 使用率、磁盘 I/O 与网络瞬时速度不纳入采集、推送或存储。
+主机详情页 `host.php?id=...`、完整主机列表与趋势接口需要先在 `admin.php` 登录；状态总览和经过脱敏的状态 API 保持公开，不返回设备唯一 ID、IP、Agent 版本和硬件详情。详情页使用左宽右窄布局，左侧按“系统负载、内存、磁盘占用率”展示趋势，右侧展示 CPU 型号、内存/磁盘大小、合并后的 IP 列表和最近接收时间。Hub 按 `device_id` 识别设备，Hostname 仅作显示名；CPU 使用率、磁盘 I/O 与网络瞬时速度不纳入采集、推送或存储。
 
 ## Agent 配置
 

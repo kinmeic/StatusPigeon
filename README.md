@@ -28,7 +28,7 @@ status-pigeon/
 
 ### 1. 编译
 
-需 Go 1.21+。若网络受限，设置国内代理：`export GOPROXY=https://goproxy.cn,direct`
+构建 Hub/Agent 需 Go 1.26.5+（包含当前标准库安全修复）。若网络受限，设置国内代理：`export GOPROXY=https://goproxy.cn,direct`
 
 ```bash
 # Hub
@@ -161,7 +161,8 @@ opkg install luci-app-statuspigeon_*.ipk
 | 项 | 默认 | 说明 |
 |----|------|------|
 | `http_addr` | `:9527` | HTTP 监听地址 |
-| `auth` | — | push 上报鉴权 token |
+| `auth` | — | push 上报鉴权 token；默认必须配置 |
+| `allow_unauthenticated_reports` | `false` | 仅隔离开发环境可显式允许无鉴权上报 |
 | `pull_interval` | `5m` | 拉取间隔 |
 | `pull_targets` | — | 主动拉取目标列表 |
 | `retention_days` | `90` | 数据保留天数 |
@@ -180,6 +181,7 @@ opkg install luci-app-statuspigeon_*.ipk
 | `token` | — | push：与 Hub auth 一致；listen：拉取鉴权 |
 | `interval` | `300` | push：上报间隔秒 |
 | `listen_addr` | `:9527` | listen：监听地址 |
+| `allow_unauthenticated_listen` | `false` | 仅隔离开发环境可显式允许无鉴权 listen |
 
 > 所有配置项均可通过 `STATUSPIGEON_*` 环境变量覆盖。
 
@@ -188,12 +190,12 @@ Hub 使用 report 中的 `device_id` 作为设备唯一身份，`hostname` 仅�
 ## 安全建议
 
 - **务必设置强 token**：`openssl rand -hex 32` 生成，Hub 与 Agent 保持一致。
-- push 鉴权 + 时间窗口校验（±5 分钟）防伪造与重放。
+- push 鉴权 + 时间窗口校验（±5 分钟）防伪造；内容完全相同的网络重试按幂等请求处理。
 - listen 模式也支持 Bearer 鉴权，公网暴露务必启用。
 - 数据库目录建议设权限 `0750`，避免 Web 直接访问。
 
 ## 技术栈
 
-- Go 1.21+（gopsutil/v3 采集、modernc.org/sqlite 纯 Go 存储）
+- Go 1.26.5+（gopsutil/v3 采集、modernc.org/sqlite 纯 Go 存储）
 - 前端：原生 HTML/CSS/JS + Chart.js（本地引入，无外网依赖）
 - 嵌入式静态资源（`go:embed`），Hub 单文件部署

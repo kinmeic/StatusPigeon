@@ -56,6 +56,9 @@ func systemdUnitPath(name string) string {
 }
 
 func installSystemd(info ServiceInfo) error {
+	if strings.IndexFunc(info.Binary+info.WorkDir, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return fmt.Errorf("二进制或工作目录包含控制字符")
+	}
 	unitPath := systemdUnitPath(info.Name)
 	// systemd 按空格拆分 ExecStart，路径必须加引号。
 	execStart := systemdQuote(info.Binary)
@@ -115,6 +118,7 @@ func procdInitPath(name string) string {
 // systemdQuote systemd 单元内的参数引号转义（双引号包裹，转义内部双引号与反斜杠）。
 func systemdQuote(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `%%`)
 	return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
 }
 

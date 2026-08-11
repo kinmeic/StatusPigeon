@@ -6,8 +6,14 @@ if (defined('STATUSPIGEON_BOOTSTRAPPED')) {
 }
 define('STATUSPIGEON_BOOTSTRAPPED', true);
 
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
+header('Referrer-Policy: same-origin');
+header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
+
 $config = array(
     'api_key' => '',
+	'allow_unauthenticated_reports' => false,
     'admin_password_hash' => '',
     'public_base_url' => '',
     'db_path' => dirname(__DIR__) . '/../statuspigeon-data/statuspigeon.sqlite',
@@ -54,6 +60,13 @@ foreach ($environment as $key => $name) {
     if ($value !== false && $value !== '') {
         $config[$key] = $value;
     }
+}
+$allowUnauthenticated = getenv('STATUSPIGEON_ALLOW_UNAUTHENTICATED_REPORTS');
+if ($allowUnauthenticated !== false && $allowUnauthenticated !== '') {
+	$config['allow_unauthenticated_reports'] = filter_var(
+		$allowUnauthenticated,
+		FILTER_VALIDATE_BOOLEAN
+	);
 }
 
 if (!empty($config['timezone'])) {
@@ -120,12 +133,24 @@ function statuspigeon_require_api_key($config)
 {
     $expected = (string) $config['api_key'];
     if ($expected === '') {
-        return;
+		if (!empty($config['allow_unauthenticated_reports'])) {
+			return;
+		}
+		statuspigeon_text_error('report authentication is not configured', 503);
     }
     $provided = statuspigeon_request_key();
     if ($provided === '' || !hash_equals($expected, $provided)) {
         statuspigeon_text_error('unauthorized', 401);
     }
+}
+
+function statuspigeon_require_json_content_type()
+{
+	$contentType = isset($_SERVER['CONTENT_TYPE']) ? trim((string) $_SERVER['CONTENT_TYPE']) : '';
+	$mediaType = strtolower(trim(explode(';', $contentType, 2)[0]));
+	if ($mediaType !== 'application/json') {
+		statuspigeon_text_error('content type must be application/json', 415);
+	}
 }
 
 function statuspigeon_request_body($config)
@@ -154,23 +179,16 @@ function statuspigeon_request_remote_ip()
     if ($directPublic !== '') {
         return $directPublic;
     }
-
-    // Only consult forwarding headers when the immediate peer is not public.
-    // This avoids trusting spoofed X-Forwarded-For headers on direct traffic.
-    $headers = array('HTTP_CF_CONNECTING_IP', 'HTTP_TRUE_CLIENT_IP', 'HTTP_X_REAL_IP');
-    foreach ($headers as $header) {
-        if (!isset($_SERVER[$header])) {
-            continue;
-        }
-        $candidate = statuspigeon_public_ip($_SERVER[$header]);
-        if ($candidate !== '') {
-            return $candidate;
-        }
-    }
+	if ($direct === '' || filter_var($direct, FILTER_VALIDATE_IP) === false) {
+		return '';
+	}
 
     if (isset($_SERVER['HTTP_X_FORWARDED_FOR'])) {
         $forwarded = explode(',', (string) $_SERVER['HTTP_X_FORWARDED_FOR']);
-        foreach ($forwarded as $candidate) {
+		// Walk from the trusted proxy end. If an upstream appends the real
+		// address to a client-supplied header, the leftmost value is spoofable.
+		for ($index = count($forwarded) - 1; $index >= 0; $index--) {
+			$candidate = $forwarded[$index];
             $candidate = trim($candidate);
             $candidate = trim($candidate, " \t\r\n\"'");
             $candidate = preg_replace('/^for=/i', '', $candidate);
@@ -185,8 +203,41 @@ function statuspigeon_request_remote_ip()
         }
     }
 
+	// Only consult forwarding headers when the immediate peer is not public.
+	// These single-value headers are fallbacks for proxies without XFF.
+	$headers = array('HTTP_X_REAL_IP', 'HTTP_CF_CONNECTING_IP', 'HTTP_TRUE_CLIENT_IP');
+	foreach ($headers as $header) {
+		if (!isset($_SERVER[$header])) {
+			continue;
+		}
+		$candidate = statuspigeon_public_ip($_SERVER[$header]);
+		if ($candidate !== '') {
+			return $candidate;
+		}
+	}
+
     // Do not persist/display a private gateway address as @hub.
     return '';
+}
+
+function statuspigeon_request_is_https()
+{
+	if (!empty($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) !== 'off') {
+		return true;
+	}
+	if (isset($_SERVER['SERVER_PORT']) && (int) $_SERVER['SERVER_PORT'] === 443) {
+		return true;
+	}
+	$direct = isset($_SERVER['REMOTE_ADDR']) ? trim((string) $_SERVER['REMOTE_ADDR']) : '';
+	if ($direct === '' || statuspigeon_public_ip($direct) !== '') {
+		return false;
+	}
+	if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
+		$values = explode(',', strtolower((string) $_SERVER['HTTP_X_FORWARDED_PROTO']));
+		$proto = trim($values[count($values) - 1]);
+		return $proto === 'https';
+	}
+	return false;
 }
 
 function statuspigeon_range_seconds($range)

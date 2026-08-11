@@ -6,8 +6,9 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,9 @@ type Config struct {
 	// HTTP 服务
 	HTTPAddr string `yaml:"http_addr"` // 监听地址，如 :9527
 	Auth     string `yaml:"auth"`      // push 上报鉴权 token
+	// Explicit opt-out for isolated development environments. Production
+	// receivers fail closed when auth is empty.
+	AllowUnauthenticatedReports bool `yaml:"allow_unauthenticated_reports"`
 
 	// 主动监控（pull）
 	PullInterval time.Duration `yaml:"pull_interval"` // 拉取间隔，默认 5m
@@ -78,6 +82,11 @@ func loadConfig(path string) (*Config, error) {
 			cfg.PullInterval = d
 		}
 	}
+	if v := os.Getenv("STATUSPIGEON_ALLOW_UNAUTHENTICATED_REPORTS"); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.AllowUnauthenticatedReports = enabled
+		}
+	}
 
 	// 默认值。
 	if cfg.HTTPAddr == "" {
@@ -114,10 +123,24 @@ func loadConfig(path string) (*Config, error) {
 		cfg.DBPath = "data/statuspigeon.db"
 	}
 	cfg.Auth = strings.TrimSpace(cfg.Auth)
+	if cfg.PullInterval > 30*24*time.Hour || cfg.ReportInterval > 30*24*time.Hour {
+		return nil, fmt.Errorf("pull_interval 和 report_interval 不能超过 30 天")
+	}
+	if cfg.PullTimeout > 5*time.Minute {
+		return nil, fmt.Errorf("pull_timeout 不能超过 5 分钟")
+	}
+	if cfg.CleanupInterval > 30*24*time.Hour {
+		return nil, fmt.Errorf("cleanup_interval 不能超过 30 天")
+	}
+	if cfg.OfflinePeriods > 1000 {
+		return nil, fmt.Errorf("offline_periods 不能超过 1000")
+	}
+	if cfg.RetentionDays > 36500 {
+		return nil, fmt.Errorf("retention_days 不能超过 36500")
+	}
 
-	// 安全提示：无鉴权运行 /report 意味着任何人都能伪造上报。
-	if cfg.Auth == "" {
-		log.Println("警告: 未配置 auth，POST /report 将无鉴权接收上报（公网环境务必配置）")
+	if cfg.Auth == "" && !cfg.AllowUnauthenticatedReports {
+		return nil, fmt.Errorf("必须配置 auth；仅隔离开发环境可显式设置 allow_unauthenticated_reports: true")
 	}
 
 	// 校验主动拉取目标：name 是 hostname 的回退值，endpoint 是拉取地址，均不可缺。
@@ -128,11 +151,16 @@ func loadConfig(path string) (*Config, error) {
 		}
 		t.Name = strings.TrimSpace(t.Name)
 		t.Endpoint = strings.TrimSpace(t.Endpoint)
+		t.Token = strings.TrimSpace(t.Token)
 		if t.Name == "" {
 			return nil, fmt.Errorf("pull_targets[%d] 已启用但缺少 name（用于主机标识）", i)
 		}
 		if t.Endpoint == "" {
 			return nil, fmt.Errorf("pull_targets[%d] (%s) 已启用但缺少 endpoint", i, t.Name)
+		}
+		parsed, err := url.Parse(t.Endpoint)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return nil, fmt.Errorf("pull_targets[%d] (%s) endpoint 必须是有效的 http 或 https 地址", i, t.Name)
 		}
 	}
 

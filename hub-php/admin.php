@@ -118,6 +118,11 @@ if ($action === 'logout') {
         statuspigeon_admin_redirect('请求校验失败', true, 'admin.php');
     }
     $_SESSION = array();
+	if (ini_get('session.use_cookies')) {
+		$params = session_get_cookie_params();
+		setcookie(session_name(), '', time() - 42000,
+			$params['path'], $params['domain'], $params['secure'], $params['httponly']);
+	}
     session_destroy();
     header('Location: admin.php');
     exit;
@@ -179,18 +184,11 @@ $configuredBaseUrl = isset($config['public_base_url']) ? trim((string) $config['
 if ($configuredBaseUrl !== '') {
     $publicBaseUrl = rtrim($configuredBaseUrl, '/');
 } else {
-    $scheme = 'https';
-    if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
-        $forwardedProto = trim(explode(',', (string) $_SERVER['HTTP_X_FORWARDED_PROTO'])[0]);
-        if (preg_match('/^https?$/i', $forwardedProto)) {
-            $scheme = strtolower($forwardedProto);
-        }
-    } elseif (!empty($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) !== 'off') {
-        $scheme = 'https';
-    } elseif (isset($_SERVER['SERVER_PORT']) && (int) $_SERVER['SERVER_PORT'] === 80) {
-        $scheme = 'http';
-    }
+	$scheme = statuspigeon_request_is_https() ? 'https' : 'http';
     $host = isset($_SERVER['HTTP_HOST']) ? trim((string) $_SERVER['HTTP_HOST']) : 'localhost';
+	if (!preg_match('/^(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?$/', $host)) {
+		$host = 'localhost';
+	}
     $publicBaseUrl = $scheme . '://' . $host . $basePath;
 }
 $reportUrl = rtrim($publicBaseUrl, '/') . '/report/';

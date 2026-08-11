@@ -23,3 +23,6 @@ interval: 300
 # ====== listen 模式专用 ======
 # 监听地址（listen 模式）。留空则 :9527。
 listen_addr: ":9527"
+# Secure default: listen mode requires token. Use true only in an isolated
+# development environment that deliberately has no authentication.
+allow_unauthenticated_listen: false

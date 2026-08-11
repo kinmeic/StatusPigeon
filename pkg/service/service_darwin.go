@@ -55,7 +55,7 @@ func buildPlist(info ServiceInfo) string {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>` + info.Name + `</string>
+    <string>` + plistEscape(info.Name) + `</string>
     <key>ProgramArguments</key>
     <array>
 `)

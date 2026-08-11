@@ -78,11 +78,15 @@ func main() {
 		RunMaintenance(ctx, store, cfg)
 	}()
 
-	srv := NewServer(store, judge, cfg.Auth, cfg.UptimeBarDays, assetsFS)
+	srv := NewServer(store, judge, cfg.Auth, cfg.AllowUnauthenticatedReports, cfg.UptimeBarDays, assetsFS)
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           srv.Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 
 	// 优雅退出：先停后台循环，再平滑关闭 HTTP（等待在途请求完成）。

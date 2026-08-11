@@ -110,9 +110,13 @@ func (p *Puller) pullOne(ctx context.Context, t HostTarget) {
 	}
 
 	// 限制响应体大小。
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPullBodyBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPullBodyBytes+1))
 	if err != nil {
 		log.Printf("puller[%s]: 读取响应失败: %v", t.Name, err)
+		return
+	}
+	if len(body) > maxPullBodyBytes {
+		log.Printf("puller[%s]: 响应体过大", t.Name)
 		return
 	}
 	var r pkgmetrics.Report
@@ -127,6 +131,10 @@ func (p *Puller) pullOne(ctx context.Context, t HostTarget) {
 	// 若返回体时间戳缺失/异常，用当前时间。
 	if r.Timestamp <= 0 {
 		r.Timestamp = time.Now().Unix()
+	}
+	if err := pkgmetrics.ValidateReport(&r); err != nil {
+		log.Printf("puller[%s]: 报告校验失败: %v", t.Name, err)
+		return
 	}
 
 	// 与 push 共用同一入库流程（source=pull）。

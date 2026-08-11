@@ -4,8 +4,31 @@
 function statuspigeon_admin_session_start()
 {
     if (session_status() !== PHP_SESSION_ACTIVE) {
+		@ini_set('session.use_only_cookies', '1');
+		@ini_set('session.use_strict_mode', '1');
+		@ini_set('session.cookie_httponly', '1');
+		@ini_set('session.cookie_samesite', 'Lax');
         session_name('statuspigeon_admin');
-        @session_start();
+		$secure = function_exists('statuspigeon_request_is_https') && statuspigeon_request_is_https();
+		// PHP 7.2 has no array-form SameSite option. The path suffix is the
+		// compatible fallback; newer runtimes also honor session.cookie_samesite.
+		if (PHP_VERSION_ID >= 70300) {
+			@session_set_cookie_params(array(
+				'lifetime' => 0,
+				'path' => '/',
+				'domain' => '',
+				'secure' => $secure,
+				'httponly' => true,
+				'samesite' => 'Lax',
+			));
+		} else {
+			@session_set_cookie_params(0, '/; samesite=Lax', '', $secure, true);
+		}
+		if (!@session_start()) {
+			statuspigeon_text_error('unable to start admin session', 500);
+		}
+		header('Cache-Control: no-store, private');
+		header('Pragma: no-cache');
     }
 }
 
@@ -44,6 +67,7 @@ function statuspigeon_admin_require_page()
 
 function statuspigeon_admin_require_api()
 {
+	header('Cache-Control: no-store, private');
     if (!statuspigeon_admin_logged_in()) {
         statuspigeon_text_error('unauthorized', 401);
     }

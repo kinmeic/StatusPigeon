@@ -6,6 +6,10 @@
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 umask 077
 reason="${1:-timer}"
+case "$reason" in
+	timer|manual|network|status) ;;
+	*) reason=timer ;;
+esac
 timestamp="$(date +%s)"
 state_dir=/tmp/statuspigeon
 state_file="$state_dir/last-report"
@@ -129,7 +133,7 @@ trap 'rm -rf /tmp/statuspigeon-report.lock' EXIT HUP INT TERM
 
 hostname="${hostname:-$(cat /proc/sys/kernel/hostname 2>/dev/null || uname -n)}"
 agent_version="$(get_uci statuspigeon.main.agent_version)"
-agent_version="${agent_version:-luci-app-statuspigeon/1.0.8}"
+agent_version="${agent_version:-luci-app-statuspigeon/1.0.9}"
 uptime="$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)"
 kernel="$(uname -r 2>/dev/null || echo unknown)"
 arch="$(uname -m 2>/dev/null || echo unknown)"
@@ -155,7 +159,9 @@ hash_device_identity() {
 	elif command -v md5sum >/dev/null 2>&1; then
 		printf '%s' "$value" | md5sum | awk '{print "md5:" $1}'
 	else
-		printf 'raw:%s\n' "$value"
+		# BusyBox always provides cksum. It is not cryptographic, but avoids
+		# transmitting a raw serial/MAC on unusually minimal images.
+		printf '%s' "$value" | cksum | awk '{print "cksum:" $1 "-" $2}'
 	fi
 }
 
@@ -268,6 +274,9 @@ collect_ubus_ip_addresses() {
 
 	for priority in 0 1 2; do
 		for interface_name in $interface_names; do
+			case "$interface_name" in
+				''|*[!A-Za-z0-9_.-]*) continue ;;
+			esac
 			[ "$(ip_interface_priority "$interface_name")" = "$priority" ] || continue
 
 			ipv4_values="$(printf '%s\n' "$network_json" | jsonfilter -e "@.interface[@.interface='$interface_name'][\"ipv4-address\"][*].address" 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"

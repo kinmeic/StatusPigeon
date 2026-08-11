@@ -16,12 +16,18 @@ foreach (statuspigeon_hosts($pdo) as $host) {
         $total += 1.0;
         if ($point['status'] === 'operational') {
             $uptime += 1.0;
-        } elseif ($point['status'] === 'degraded') {
+		} elseif ($point['status'] === 'degraded' || $point['status'] === 'down') {
             $uptime += ((float) $point['uptime']) / 100.0;
         }
     }
-    $host['daily'] = $daily;
-    $host['uptime_pct'] = $total > 0 ? $uptime / $total * 100.0 : 0.0;
-    $out[] = $host;
+	$out[] = array(
+		'id' => (int) $host['id'],
+		'hostname' => (string) $host['hostname'],
+		'last_seen' => (int) $host['last_seen'],
+		'last_status' => (string) $host['last_status'],
+		'last_summary' => statuspigeon_public_summary($host['last_summary']),
+		'daily' => $daily,
+		'uptime_pct' => $total > 0 ? $uptime / $total * 100.0 : 0.0,
+	);
 }
 statuspigeon_json_response($out, 200);

@@ -7,6 +7,9 @@ http_addr: ":9527"
 # push 上报鉴权 token。需与 push 模式 agent 的 token 一致。
 # 留空则不鉴权（不推荐）。生成：openssl rand -hex 32
 auth: "change-me-to-a-long-random-secret"
+# Secure default: an empty auth value is rejected. Use true only in an
+# isolated development environment that deliberately has no authentication.
+allow_unauthenticated_reports: false
 
 # ====== 主动监控（pull） ======
 # 拉取间隔（拉取 listen 模式 agent 的 /metrics）。

@@ -13,8 +13,10 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,16 +31,17 @@ const maxReportBodyBytes = 1 << 20
 
 // Server 持有运行期依赖。
 type Server struct {
-	store   *Store
-	judge   *Judge
-	auth    string
-	barDays int
-	assets  embed.FS
+	store                *Store
+	judge                *Judge
+	auth                 string
+	allowUnauthenticated bool
+	barDays              int
+	assets               embed.FS
 }
 
 // NewServer 创建 HTTP 服务。
-func NewServer(store *Store, judge *Judge, auth string, barDays int, assets embed.FS) *Server {
-	return &Server{store: store, judge: judge, auth: auth, barDays: barDays, assets: assets}
+func NewServer(store *Store, judge *Judge, auth string, allowUnauthenticated bool, barDays int, assets embed.FS) *Server {
+	return &Server{store: store, judge: judge, auth: auth, allowUnauthenticated: allowUnauthenticated, barDays: barDays, assets: assets}
 }
 
 // Routes 返回路由 mux。
@@ -50,7 +53,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/metrics", s.handleMetrics)
 	// 静态资源（前端）。/ 映射到 assets/index.html。
 	mux.HandleFunc("/", s.handleStatic)
-	return mux
+	return securityHeaders(mux)
 }
 
 // ====== POST /report ======
@@ -61,14 +64,28 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 鉴权（恒定时间比较，防时序侧信道）。
+	if s.auth == "" && !s.allowUnauthenticated {
+		http.Error(w, "report authentication is not configured", http.StatusServiceUnavailable)
+		return
+	}
 	if s.auth != "" && !bearerOK(r.Header.Get("Authorization"), s.auth) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		http.Error(w, "content type must be application/json", http.StatusUnsupportedMediaType)
 		return
 	}
 
 	// 限制请求体大小。
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxReportBodyBytes))
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
@@ -77,8 +94,12 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if report.Hostname == "" || report.Timestamp <= 0 {
-		http.Error(w, "missing hostname/timestamp", http.StatusBadRequest)
+	if report.Timestamp <= 0 {
+		http.Error(w, "missing timestamp", http.StatusBadRequest)
+		return
+	}
+	if err := pkgmetrics.ValidateReport(&report); err != nil {
+		http.Error(w, "invalid report: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	// 时间窗口校验（防重放）。
@@ -118,10 +139,26 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	}
 	hosts, err := s.store.ListHosts()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errMap(err))
+		log.Printf("list hosts 失败: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
-	writeJSON(w, http.StatusOK, hosts)
+	type hostDetail struct {
+		ID          int64  `json:"id"`
+		Hostname    string `json:"hostname"`
+		OS          string `json:"os"`
+		Kernel      string `json:"kernel"`
+		Arch        string `json:"arch"`
+		LastSeen    int64  `json:"last_seen"`
+		LastStatus  string `json:"last_status"`
+		LastSummary string `json:"last_summary"`
+		Source      string `json:"source"`
+	}
+	out := make([]hostDetail, 0, len(hosts))
+	for _, h := range hosts {
+		out = append(out, hostDetail{h.ID, h.Hostname, h.OS, h.Kernel, h.Arch, h.LastSeen, h.LastStatus, h.LastSummary, h.Source})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // ====== GET /api/status?days= ======
@@ -138,23 +175,33 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	hosts, err := s.store.ListHosts()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errMap(err))
+		log.Printf("list status hosts 失败: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
 
 	type hostStatus struct {
-		HostRow
-		Daily  []DailyPoint `json:"daily"`
-		Uptime float64      `json:"uptime_pct"` // 区间总可用率
+		ID          int64        `json:"id"`
+		Hostname    string       `json:"hostname"`
+		LastSeen    int64        `json:"last_seen"`
+		LastStatus  string       `json:"last_status"`
+		LastSummary string       `json:"last_summary"`
+		Daily       []DailyPoint `json:"daily"`
+		Uptime      float64      `json:"uptime_pct"` // 区间总可用率
 	}
 	out := make([]hostStatus, 0, len(hosts))
 	for _, h := range hosts {
 		daily, err := s.store.DailyStatus(h.ID, days)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, errMap(err))
+			log.Printf("daily status host=%d 失败: %v", h.ID, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 			return
 		}
-		out = append(out, hostStatus{HostRow: h, Daily: daily, Uptime: rangeUptime(daily)})
+		out = append(out, hostStatus{
+			ID: h.ID, Hostname: h.Hostname, LastSeen: h.LastSeen,
+			LastStatus: h.LastStatus, LastSummary: publicSummary(h.LastSummary),
+			Daily: daily, Uptime: rangeUptime(daily),
+		})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -175,7 +222,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	pts, err := s.store.MetricsSeries(id, fromTs)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errMap(err))
+		log.Printf("metrics host=%d 失败: %v", id, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
 	writeJSON(w, http.StatusOK, pts)
@@ -210,15 +258,37 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func errMap(err error) map[string]string {
-	return map[string]string{"error": err.Error()}
-}
-
 func abs(x int64) int64 {
 	if x < 0 {
 		return -x
 	}
 	return x
+}
+
+func publicSummary(raw string) string {
+	var input struct {
+		Mem   float64 `json:"mem"`
+		Load1 float64 `json:"load1"`
+		OS    string  `json:"os"`
+	}
+	if json.Unmarshal([]byte(raw), &input) != nil {
+		return `{}`
+	}
+	data, err := json.Marshal(input)
+	if err != nil {
+		return `{}`
+	}
+	return string(data)
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // rangeUptime 计算一组日聚合的总可用率（忽略 no-data 天）。
@@ -231,8 +301,8 @@ func rangeUptime(daily []DailyPoint) float64 {
 		total++
 		if d.Status == statusOperational {
 			ok++
-		} else if d.Status == statusDegraded {
-			ok += d.Uptime / 100.0 // 降级天按其部分可用率计
+		} else if d.Status == statusDegraded || d.Status == statusDown {
+			ok += d.Uptime / 100.0 // 异常天按其样本可用率计
 		}
 	}
 	if total == 0 {
