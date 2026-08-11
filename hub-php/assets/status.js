@@ -39,6 +39,14 @@
     ].filter(Boolean).join(' · ');
   }
 
+  function formatLastSeen(timestamp) {
+    var date = new Date(Number(timestamp || 0) * 1000);
+    if (!timestamp || isNaN(date.getTime())) return '—';
+    function pad(value) { return value < 10 ? '0' + value : String(value); }
+    return date.getFullYear() + '/' + (date.getMonth() + 1) + '/' + date.getDate() +
+      ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
+  }
+
   function dayBlock(day) {
     var status = day.status || 'no-data';
     var title = day.date + ' · ' + (labels[status] || status) + ' · 可用率 ' +
@@ -50,14 +58,14 @@
   function hostCard(host) {
     var badge = host.last_status || 'no-data';
     var daily = Array.isArray(host.daily) ? host.daily : [];
-    var lastSeen = host.last_seen ? new Date(Number(host.last_seen) * 1000).toLocaleString('zh-CN') : '—';
+    var meta = [summary(host), '最近接收：' + formatLastSeen(host.last_seen)]
+      .filter(Boolean).join(' · ');
     return '<article class="host-card"><div class="host-top"><div class="host-left">' +
       '<a class="host-name" href="host.php?id=' + encodeURIComponent(host.id) + '">' +
       escapeHtml(host.hostname) + '</a><span class="badge badge-' + escapeHtml(badge) + '">' +
       escapeHtml(labels[badge] || badge) + '</span></div><span class="host-uptime">' +
       (host.uptime_pct === undefined ? '—' : Number(host.uptime_pct).toFixed(2) + '%') +
-      '</span></div><div class="host-meta">' + escapeHtml(summary(host)) +
-      '</div><div class="host-meta host-last-seen">最近接收：' + escapeHtml(lastSeen) +
+      '</span></div><div class="host-meta">' + escapeHtml(meta) +
       '</div><div class="bar" style="--bar-days:' + daily.length + '" role="img" aria-label="最近 ' +
       daily.length + ' 天状态">' + daily.map(dayBlock).join('') + '</div><div class="bar-caption"><span>' +
       (daily.length ? escapeHtml(daily[0].date) : '') + '</span><span>' +

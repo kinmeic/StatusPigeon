@@ -35,6 +35,7 @@ body {
 .host-name { color: var(--text); font-size: 16px; font-weight: 600; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .host-name:hover, .back-link:hover { text-decoration: underline; }
 .host-meta, .host-uptime, .page-foot { color: var(--muted); font-size: 12px; }
+.host-meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .host-uptime { font-size: 13px; white-space: nowrap; }
 .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
 .badge:before { content: ""; width: 8px; height: 8px; border-radius: 50%; }
@@ -66,7 +67,7 @@ body {
 .empty { padding: 40px 0; color: var(--muted); text-align: center; }
 .back-link { color: var(--muted); font-size: 13px; text-decoration: none; }
 .detail-head { margin: 16px 0 24px; } .detail-head h1 { margin: 0 0 8px; }
-.detail-layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(220px, 1fr); gap: 16px; align-items: start; }
+.detail-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 16px; align-items: start; }
 .detail-main, .detail-sidebar { min-width: 0; }
 .detail-sidebar { position: sticky; top: 20px; }
 .info-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
