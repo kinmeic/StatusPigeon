@@ -9,7 +9,7 @@
   - **Pull**：Hub 主动拉取。适合有公网域名、可直接访问的云主机。
 - **失联检测**：Agent 掉线/断网/宕机，Hub 通过超时判定自动标记为 `down`。
 - **单二进制部署**：Hub / Agent 各一个可执行文件，纯 Go 无 cgo，可交叉编译。Agent 支持 Linux/Mac/OpenWrt(mipsle) 等；Hub 因 SQLite 驱动（modernc.org/sqlite）限制不支持 mips 架构（Hub 一般部署在标准服务器上）。
-- **精简指标**：基础信息 + CPU + 内存 + 负载。
+- **精简指标**：基础信息 + 系统负载 + 内存 + 磁盘占用率。
 - **状态页 UI**：90 天 uptime 色块条 + hover 详情 + 主机趋势图（Chart.js）。
 - **数据自管理**：SQLite，按天自动清理过期数据。
 
@@ -138,16 +138,17 @@ opkg install luci-app-statuspigeon_*.ipk
 
 | 类别 | 字段 |
 |------|------|
-| 基础 | device_id、os、os_version、kernel、arch、uptime、IPv4/IPv6（带接口名，如 `192.168.0.68@usbwan`） |
-| CPU | usage%、load1/5/15 |
+| 基础 | device_id、os、os_version、kernel、arch、uptime、CPU 型号、IPv4/IPv6（带接口名，如 `192.168.0.68@usbwan`） |
+| 负载 | load1/5/15 |
 | 内存 | total/used/available、used_pct、swap_total/swap_used |
+| 磁盘 | total、used_pct（根文件系统） |
 
 ## 状态判定
 
 | 状态 | 触发条件 | 色块 |
 |------|----------|------|
 | operational | 正常 | 🟩 |
-| degraded | CPU > 90% 或 内存 > 95%（可配置） | 🟨 |
+| degraded | 内存 > 95%（可配置） | 🟨 |
 | down | 失联超 3 个上报周期 | 🟥 |
 | no-data | 当天无数据 | ⬜ |
 
@@ -164,7 +165,7 @@ opkg install luci-app-statuspigeon_*.ipk
 | `pull_interval` | `5m` | 拉取间隔 |
 | `pull_targets` | — | 主动拉取目标列表 |
 | `retention_days` | `90` | 数据保留天数 |
-| `degraded_cpu` | `90` | CPU 降级阈值 % |
+| `degraded_cpu` | `90` | 已废弃，仅为兼容旧配置保留；CPU 使用率不再判定状态 |
 | `degraded_mem` | `95` | 内存降级阈值 % |
 | `offline_periods` | `3` | 失联周期数 |
 | `db_path` | `data/statuspigeon.db` | SQLite 路径 |

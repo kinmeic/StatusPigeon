@@ -17,6 +17,7 @@ $config = array(
     'timezone' => 'Asia/Shanghai',
     'retention_days' => 90,
     'uptime_bar_days' => 60,
+    // Deprecated compatibility setting; CPU percentage is no longer used.
     'degraded_cpu' => 90.0,
     'degraded_mem' => 95.0,
     'report_interval' => 300,

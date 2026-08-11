@@ -319,7 +319,7 @@ if ($loggedIn && $section === 'logs') {
                 <div class="log-table-wrap">
                   <table class="log-table">
                     <thead>
-                      <tr><th>时间</th><th>主机</th><th>CPU</th><th>MEM</th><th>主机状态</th></tr>
+                      <tr><th>时间</th><th>主机</th><th>MEM</th><th>主机状态</th></tr>
                     </thead>
                     <tbody>
                       <?php foreach ($logReports as $log): ?>
@@ -331,7 +331,6 @@ if ($loggedIn && $section === 'logs') {
                         <tr>
                           <td class="log-time" data-timestamp="<?php echo (int) $log['ts']; ?>"><?php echo statuspigeon_admin_escape(date('Y-m-d H:i:s', (int) $log['ts'])); ?></td>
                           <td><?php echo statuspigeon_admin_escape($log['hostname']); ?></td>
-                          <td><?php echo statuspigeon_admin_escape(number_format((float) $log['cpu_usage'], 1)); ?>%</td>
                           <td><?php echo statuspigeon_admin_escape(number_format((float) $log['mem_usage'], 1)); ?>%</td>
                           <td><span class="badge badge-<?php echo statuspigeon_admin_escape($logStatus === 'operational' || $logStatus === 'degraded' ? $logStatus : 'no-data'); ?>"><?php echo statuspigeon_admin_escape($logStatusLabel); ?></span></td>
                         </tr>

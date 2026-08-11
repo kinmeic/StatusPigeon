@@ -25,9 +25,9 @@ statuspigeon_admin_require_page();
           <button data-range="24h" class="active">24 小时</button>
           <button data-range="7d">7 天</button>
         </div>
-        <div class="chart-box"><h3>CPU 使用率 (%)</h3><div id="chart-cpu" class="chart"></div></div>
-        <div class="chart-box"><h3>内存使用率 (%)</h3><div id="chart-mem" class="chart"></div></div>
         <div class="chart-box"><h3>系统负载 (load1)</h3><div id="chart-load" class="chart"></div></div>
+        <div class="chart-box"><h3>内存使用率 (%)</h3><div id="chart-mem" class="chart"></div></div>
+        <div class="chart-box"><h3>磁盘占用率 (%)</h3><div id="chart-disk" class="chart"></div></div>
       </main>
       <aside class="detail-sidebar">
         <section class="info-card">
@@ -37,6 +37,10 @@ statuspigeon_admin_require_page();
             <div class="system-info-row"><dt>系统版本</dt><dd id="host-os-version">—</dd></div>
             <div class="system-info-row"><dt>内核</dt><dd id="host-kernel">—</dd></div>
             <div class="system-info-row"><dt>架构</dt><dd id="host-arch">—</dd></div>
+            <div class="system-info-row"><dt>CPU 型号</dt><dd id="host-cpu-model">—</dd></div>
+            <div class="system-info-row"><dt>内存大小</dt><dd id="host-memory-total">—</dd></div>
+            <div class="system-info-row"><dt>磁盘大小</dt><dd id="host-disk-total">—</dd></div>
+            <div class="system-info-row"><dt>磁盘占用率</dt><dd id="host-disk-used-pct">—</dd></div>
             <div class="system-info-row"><dt>运行时间</dt><dd id="host-uptime">—</dd></div>
             <div class="system-info-row"><dt>最近接收</dt><dd id="host-last-report">—</dd></div>
             <div class="system-info-row"><dt>IPv4</dt><dd id="host-ipv4">—</dd></div>

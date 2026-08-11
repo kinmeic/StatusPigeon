@@ -6,21 +6,25 @@ package metrics
 
 // OsInfo contains basic system information.
 type OsInfo struct {
-	Os      string   `json:"os"`
-	Version string   `json:"version"`
-	Kernel  string   `json:"kernel"`
-	Arch    string   `json:"arch"`
-	Uptime  uint64   `json:"uptime"` // 秒
-	IPv4    []string `json:"ipv4"`   // Non-loopback IPv4 addresses, optionally suffixed with @interface.
-	IPv6    []string `json:"ipv6"`   // Non-loopback IPv6 addresses, optionally suffixed with @interface.
+	Os          string   `json:"os"`
+	Version     string   `json:"version"`
+	Kernel      string   `json:"kernel"`
+	Arch        string   `json:"arch"`
+	Uptime      uint64   `json:"uptime"` // 秒
+	CPUModel    string   `json:"cpu_model"`
+	MemoryTotal uint64   `json:"memory_total"`  // 字节
+	DiskTotal   uint64   `json:"disk_total"`    // 字节
+	DiskUsedPct float64  `json:"disk_used_pct"` // %
+	IPv4        []string `json:"ipv4"`          // Non-loopback IPv4 addresses, optionally suffixed with @interface.
+	IPv6        []string `json:"ipv6"`          // Non-loopback IPv6 addresses, optionally suffixed with @interface.
 }
 
-// CPUInfo contains CPU usage and load averages.
+// CPUInfo contains system load averages. CPU percentage is intentionally not
+// part of the report: a short instantaneous sample is too noisy to be useful.
 type CPUInfo struct {
 	Load1  float64 `json:"load1"`
 	Load5  float64 `json:"load5"`
 	Load15 float64 `json:"load15"`
-	Usage  float64 `json:"usage"` // %
 }
 
 // MemInfo contains memory and swap usage.

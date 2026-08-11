@@ -353,7 +353,11 @@ func setHostLive(run sqlRunner, hostID int64, status string, r *pkgmetrics.Repor
 
 // insertMetrics 写入原始指标。
 func insertMetrics(run sqlRunner, hostID int64, r *pkgmetrics.Report) error {
-	cpu, mem, load1 := r.Metrics.Cpu.Usage, r.Metrics.Mem.UsedPct, r.Metrics.Cpu.Load1
+	// cpu_usage is a legacy column retained for non-destructive migrations.
+	// New reports intentionally leave it NULL because CPU percentage is no
+	// longer sampled or transmitted.
+	var cpu interface{}
+	mem, load1 := r.Metrics.Mem.UsedPct, r.Metrics.Cpu.Load1
 	payload, _ := jsonMarshal(r)
 	_, err := run.Exec(
 		`INSERT INTO metrics_raw
@@ -538,12 +542,12 @@ type DailyPoint struct {
 // maxSeriesPoints 趋势查询单次返回的最大点数，防高频上报时响应体过大。
 const maxSeriesPoints = 10000
 
-// MetricsSeries 趋势查询：返回时间范围内的 cpu/mem/load 序列（升序）。
+// MetricsSeries 趋势查询：返回时间范围内的 mem/load 序列（升序）。
 // 超过 maxSeriesPoints 时取最新的 N 条。
 func (s *Store) MetricsSeries(hostID int64, fromTs int64) ([]MetricPoint, error) {
 	rows, err := s.db.Query(
-		`SELECT ts, cpu_usage, mem_usage, load1 FROM (
-		    SELECT ts, cpu_usage, mem_usage, load1 FROM metrics_raw
+		`SELECT ts, mem_usage, load1 FROM (
+		    SELECT ts, mem_usage, load1 FROM metrics_raw
 		    WHERE host_id=? AND ts >= ? ORDER BY ts DESC LIMIT ?
 		) ORDER BY ts`,
 		hostID, fromTs, maxSeriesPoints,
@@ -556,7 +560,7 @@ func (s *Store) MetricsSeries(hostID int64, fromTs int64) ([]MetricPoint, error)
 	var out []MetricPoint
 	for rows.Next() {
 		var p MetricPoint
-		if err := rows.Scan(&p.Ts, &p.CPU, &p.Mem, &p.Load); err != nil {
+		if err := rows.Scan(&p.Ts, &p.Mem, &p.Load); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -567,7 +571,6 @@ func (s *Store) MetricsSeries(hostID int64, fromTs int64) ([]MetricPoint, error)
 // MetricPoint 单个指标样本。
 type MetricPoint struct {
 	Ts   int64    `json:"ts"`
-	CPU  *float64 `json:"cpu"`
 	Mem  *float64 `json:"mem"`
 	Load *float64 `json:"load1"`
 }
@@ -608,9 +611,10 @@ func boolToInt(b bool) int {
 
 // hostSummary 生成状态页徽章用的精简摘要 JSON。
 func hostSummary(m pkgmetrics.Metrics) string {
-	cpu, mem, load1 := m.Cpu.Usage, m.Mem.UsedPct, m.Cpu.Load1
-	return fmt.Sprintf(`{"cpu":%.1f,"mem":%.1f,"load1":%.2f,"uptime":%d,"os":%q,"os_version":%q,"ipv4":%s,"ipv6":%s}`,
-		cpu, mem, load1, m.Os.Uptime, m.Os.Os, m.Os.Version,
+	mem, load1 := m.Mem.UsedPct, m.Cpu.Load1
+	return fmt.Sprintf(`{"mem":%.1f,"load1":%.2f,"uptime":%d,"os":%q,"os_version":%q,"cpu_model":%q,"memory_total":%d,"disk_total":%d,"disk_used_pct":%.1f,"ipv4":%s,"ipv6":%s}`,
+		mem, load1, m.Os.Uptime, m.Os.Os, m.Os.Version, m.Os.CPUModel,
+		m.Os.MemoryTotal, m.Os.DiskTotal, m.Os.DiskUsedPct,
 		jsonMarshalString(m.Os.IPv4), jsonMarshalString(m.Os.IPv6))
 }
 

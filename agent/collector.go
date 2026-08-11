@@ -1,8 +1,8 @@
-// Package main: collector.go — collect system, CPU and memory metrics.
+// Package main: collector.go — collect system, load and memory metrics.
 //
 // Collected values include:
 //   - system: OS, kernel, architecture, uptime and IP addresses
-//   - CPU: load averages and usage percentage
+//   - load: 1/5/15 minute load averages
 //   - memory: total, used, available and swap
 //
 // Disk and network throughput are deliberately not sampled: a single
@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/load"
 	"github.com/shirou/gopsutil/v3/mem"
@@ -31,7 +32,7 @@ import (
 // AgentVersion 编译期注入（见 Makefile -ldflags）。
 var AgentVersion = "dev"
 
-// Collector collects the stable system, CPU and memory metrics.
+// Collector collects the stable system, load and memory metrics.
 type Collector struct {
 	hostname string
 	deviceID string
@@ -69,6 +70,7 @@ func (c *Collector) Collect() (*pkgmetrics.Report, error) {
 	if err := collectMem(&report.Metrics.Mem); err != nil {
 		return nil, err
 	}
+	report.Metrics.Os.MemoryTotal = report.Metrics.Mem.Total
 	return report, nil
 }
 
@@ -134,8 +136,46 @@ func collectOs(out *pkgmetrics.OsInfo) error {
 	out.Kernel = info.KernelVersion
 	out.Arch = runtime.GOARCH
 	out.Uptime = info.Uptime
+	out.CPUModel = localCPUModel()
+	out.DiskTotal, out.DiskUsedPct = localDiskUsage()
 	out.IPv4, out.IPv6 = localIPs()
 	return nil
+}
+
+func localCPUModel() string {
+	if infos, err := cpu.Info(); err == nil {
+		for _, info := range infos {
+			if value := strings.TrimSpace(info.ModelName); value != "" {
+				return value
+			}
+		}
+	}
+	contents, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(contents), "\n") {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(parts[0]))
+		switch key {
+		case "model name", "hardware", "processor", "cpu model", "machine":
+			if value := strings.TrimSpace(parts[1]); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func localDiskUsage() (total uint64, usedPct float64) {
+	usage, err := disk.Usage("/")
+	if err != nil || usage == nil {
+		return 0, 0
+	}
+	return usage.Total, usage.UsedPercent
 }
 
 // localIPs returns non-loopback, non-link-local IPv4 and IPv6 addresses.
@@ -237,14 +277,6 @@ func collectCPU(out *pkgmetrics.CPUInfo) error {
 		out.Load1 = avg.Load1
 		out.Load5 = avg.Load5
 		out.Load15 = avg.Load15
-	}
-	// CPU 使用率：取 500ms 间隔两次采样的整体平均（false => 整体平均）。
-	percent, err := cpu.Percent(500*time.Millisecond, false)
-	if err != nil {
-		return fmt.Errorf("采集 CPU 使用率: %w", err)
-	}
-	if len(percent) > 0 {
-		out.Usage = percent[0]
 	}
 	return nil
 }

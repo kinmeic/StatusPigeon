@@ -129,7 +129,7 @@ trap 'rm -rf /tmp/statuspigeon-report.lock' EXIT HUP INT TERM
 
 hostname="${hostname:-$(cat /proc/sys/kernel/hostname 2>/dev/null || uname -n)}"
 agent_version="$(get_uci statuspigeon.main.agent_version)"
-agent_version="${agent_version:-luci-app-statuspigeon/1.0.7}"
+agent_version="${agent_version:-luci-app-statuspigeon/1.0.8}"
 uptime="$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)"
 kernel="$(uname -r 2>/dev/null || echo unknown)"
 arch="$(uname -m 2>/dev/null || echo unknown)"
@@ -194,21 +194,26 @@ if [ -z "$device_id" ]; then
 	device_id="$(hash_device_identity "hostname:${hostname}")"
 fi
 
-# Read two /proc/stat snapshots to obtain a portable aggregate CPU percentage.
-cpu_snapshot() {
-	awk '/^cpu / {print $2, $3, $4, $5, $6, $7, $8, $9; exit}' /proc/stat
-}
-cpu_1="$(cpu_snapshot)"
-sleep 1
-cpu_2="$(cpu_snapshot)"
-set -- $cpu_1
-u1="${1:-0}"; n1="${2:-0}"; s1="${3:-0}"; i1="${4:-0}"; w1="${5:-0}"; q1="${6:-0}"; r1="${7:-0}"; t1="${8:-0}"
-set -- $cpu_2
-u2="${1:-0}"; n2="${2:-0}"; s2="${3:-0}"; i2="${4:-0}"; w2="${5:-0}"; q2="${6:-0}"; r2="${7:-0}"; t2="${8:-0}"
-cpu_usage="$(awk -v u1="$u1" -v n1="$n1" -v s1="$s1" -v i1="$i1" -v w1="$w1" -v q1="$q1" -v r1="$r1" -v t1="$t1" -v u2="$u2" -v n2="$n2" -v s2="$s2" -v i2="$i2" -v w2="$w2" -v q2="$q2" -v r2="$r2" -v t2="$t2" 'BEGIN { a=u2+n2+s2+i2+w2+q2+r2+t2-(u1+n1+s1+i1+w1+q1+r1+t1); b=(i2+w2)-(i1+w1); if (a <= 0) printf "0.00"; else printf "%.2f", (a-b)*100/a }')"
-
 set -- $(awk '/^MemTotal:/{total=$2*1024} /^MemAvailable:/{available=$2*1024} /^MemFree:/{free=$2*1024} /^Buffers:/{buffers=$2*1024} /^Cached:/{cached=$2*1024} /^SwapTotal:/{swap_total=$2*1024} /^SwapFree:/{swap_free=$2*1024} END { if (available == 0) available=free+buffers+cached; used=total-available; if (used < 0) used=0; if (total > 0) pct=used*100/total; else pct=0; swap_used=swap_total-swap_free; if (swap_used < 0) swap_used=0; printf "%d %d %d %.2f %d %d", total, used, available, pct, swap_total, swap_used }' /proc/meminfo)
 mem_total="${1:-0}"; mem_used="${2:-0}"; mem_available="${3:-0}"; mem_used_pct="${4:-0}"; swap_total="${5:-0}"; swap_used="${6:-0}"
+
+cpu_model="$(awk -F: '
+	/^(model name|Hardware|Processor|cpu model|machine)[[:space:]]*:/ {
+		value=$2
+		gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+		if (value != "") { print value; exit }
+	}' /proc/cpuinfo 2>/dev/null)"
+if [ -z "$cpu_model" ] && command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then
+	board_json="$(ubus call system board 2>/dev/null || true)"
+	cpu_model="$(printf '%s\n' "$board_json" | jsonfilter -e '@.model' 2>/dev/null | sed 's/^"//; s/"$//' | head -n1)"
+fi
+
+disk_values="$(df -kP / 2>/dev/null | awk 'NR == 2 { gsub(/%/, "", $5); printf "%.0f %.2f", $2 * 1024, $5; exit }')"
+set -- $disk_values
+disk_total="${1:-0}"
+disk_used_pct="${2:-0}"
+case "$disk_total" in ''|*[!0-9]*) disk_total=0 ;; esac
+case "$disk_used_pct" in ''|*[!0-9.]*) disk_used_pct=0 ;; esac
 
 load_values="$(awk '{print $1, $2, $3}' /proc/loadavg 2>/dev/null || echo '0 0 0')"
 set -- $load_values
@@ -332,6 +337,10 @@ json_add_object 'metrics'
 	json_add_string 'kernel' "$kernel"
 	json_add_string 'arch' "$arch"
 	json_add_int 'uptime' "$uptime"
+	json_add_string 'cpu_model' "$cpu_model"
+	json_add_int 'memory_total' "$mem_total"
+	json_add_int 'disk_total' "$disk_total"
+	json_add_number 'disk_used_pct' "$disk_used_pct"
 	json_add_ip_array 'ipv4' "$ipv4"
 	json_add_ip_array 'ipv6' "$ipv6"
 	json_close_object
@@ -339,7 +348,6 @@ json_add_object 'metrics'
 	json_add_number 'load1' "$load1"
 	json_add_number 'load5' "$load5"
 	json_add_number 'load15' "$load15"
-	json_add_number 'usage' "$cpu_usage"
 	json_close_object
 	json_add_object 'mem'
 	json_add_int 'total' "$mem_total"

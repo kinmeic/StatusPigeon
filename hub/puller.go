@@ -134,6 +134,6 @@ func (p *Puller) pullOne(ctx context.Context, t HostTarget) {
 		log.Printf("puller[%s]: 入库失败: %v", t.Name, err)
 		return
 	}
-	log.Printf("puller[%s]: 拉取成功 | cpu=%.1f%% mem=%.1f%%",
-		r.Hostname, r.Metrics.Cpu.Usage, r.Metrics.Mem.UsedPct)
+	log.Printf("puller[%s]: 拉取成功 | mem=%.1f%% load1=%.2f",
+		r.Hostname, r.Metrics.Mem.UsedPct, r.Metrics.Cpu.Load1)
 }

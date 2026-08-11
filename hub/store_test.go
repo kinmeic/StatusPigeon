@@ -23,7 +23,7 @@ func newTestReport(host string, cpu float64) *pkgmetrics.Report {
 		Timestamp:    time.Now().Unix(),
 		Metrics: pkgmetrics.Metrics{
 			Os:  pkgmetrics.OsInfo{Os: "linux", Kernel: "6.1", Arch: "amd64"},
-			Cpu: pkgmetrics.CPUInfo{Usage: cpu, Load1: 1.5},
+			Cpu: pkgmetrics.CPUInfo{Load1: 1.5},
 			Mem: pkgmetrics.MemInfo{UsedPct: 50},
 		},
 	}

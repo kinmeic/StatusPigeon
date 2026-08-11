@@ -283,6 +283,16 @@ function statuspigeon_normalize_report($input)
                 'kernel' => statuspigeon_string(isset($rawOS['kernel']) ? $rawOS['kernel'] : '', ''),
                 'arch' => statuspigeon_string(isset($rawOS['arch']) ? $rawOS['arch'] : '', ''),
                 'uptime' => statuspigeon_metric_int(isset($rawOS['uptime']) ? $rawOS['uptime'] : 0, 0),
+                'cpu_model' => statuspigeon_string(isset($rawOS['cpu_model']) ? $rawOS['cpu_model'] : '', ''),
+                'memory_total' => statuspigeon_metric_int(
+                    isset($rawOS['memory_total']) ? $rawOS['memory_total']
+                        : (isset($rawMem['total']) ? $rawMem['total'] : 0),
+                    0
+                ),
+                'disk_total' => array_key_exists('disk_total', $rawOS)
+                    ? statuspigeon_metric_int($rawOS['disk_total'], 0) : null,
+                'disk_used_pct' => array_key_exists('disk_used_pct', $rawOS)
+                    ? statuspigeon_metric_number($rawOS['disk_used_pct'], 0) : null,
                 'ipv4' => statuspigeon_string_array(isset($rawOS['ipv4']) ? $rawOS['ipv4'] : array()),
                 'ipv6' => statuspigeon_string_array(isset($rawOS['ipv6']) ? $rawOS['ipv6'] : array()),
             ),
@@ -290,7 +300,6 @@ function statuspigeon_normalize_report($input)
                 'load1' => statuspigeon_metric_number(isset($rawCPU['load1']) ? $rawCPU['load1'] : 0, 0),
                 'load5' => statuspigeon_metric_number(isset($rawCPU['load5']) ? $rawCPU['load5'] : 0, 0),
                 'load15' => statuspigeon_metric_number(isset($rawCPU['load15']) ? $rawCPU['load15'] : 0, 0),
-                'usage' => statuspigeon_metric_number(isset($rawCPU['usage']) ? $rawCPU['usage'] : 0, 0),
             ),
             'mem' => array(
                 'total' => statuspigeon_metric_int(isset($rawMem['total']) ? $rawMem['total'] : 0, 0),
@@ -315,9 +324,8 @@ function statuspigeon_report_device_id($report)
 
 function statuspigeon_status_for_report($report, $config)
 {
-    $cpu = $report['metrics']['cpu']['usage'];
     $mem = $report['metrics']['mem']['used_pct'];
-    if ($cpu > (float) $config['degraded_cpu'] || $mem > (float) $config['degraded_mem']) {
+    if ($mem > (float) $config['degraded_mem']) {
         return 'degraded';
     }
     return 'operational';
@@ -326,12 +334,17 @@ function statuspigeon_status_for_report($report, $config)
 function statuspigeon_summary($metrics)
 {
     $summary = array(
-        'cpu' => round((float) $metrics['cpu']['usage'], 1),
         'mem' => round((float) $metrics['mem']['used_pct'], 1),
         'load1' => round((float) $metrics['cpu']['load1'], 2),
         'uptime' => (int) $metrics['os']['uptime'],
         'os' => (string) $metrics['os']['os'],
         'os_version' => (string) $metrics['os']['version'],
+        'cpu_model' => (string) $metrics['os']['cpu_model'],
+        'memory_total' => (int) $metrics['os']['memory_total'],
+        'disk_total' => $metrics['os']['disk_total'] === null
+            ? null : (int) $metrics['os']['disk_total'],
+        'disk_used_pct' => $metrics['os']['disk_used_pct'] === null
+            ? null : round((float) $metrics['os']['disk_used_pct'], 1),
         'ipv4' => $metrics['os']['ipv4'],
         'ipv6' => $metrics['os']['ipv6'],
     );
@@ -437,7 +450,9 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
         $insertMetric->execute(array(
             ':host_id' => $hostId,
             ':ts' => $report['timestamp'],
-            ':cpu' => $metrics['cpu']['usage'],
+            // cpu_usage is a legacy column; new reports do not store CPU
+            // percentage even when an older client included that field.
+            ':cpu' => null,
             ':mem' => $metrics['mem']['used_pct'],
             ':load1' => $metrics['cpu']['load1'],
             ':payload' => $payload,
@@ -605,6 +620,10 @@ function statuspigeon_hosts($pdo)
             'last_status' => (string) $row['last_status'],
             'last_summary' => (string) $row['last_summary'],
             'os_version' => isset($summary['os_version']) ? (string) $summary['os_version'] : '',
+            'cpu_model' => isset($summary['cpu_model']) ? (string) $summary['cpu_model'] : '',
+            'memory_total' => isset($summary['memory_total']) ? (int) $summary['memory_total'] : 0,
+            'disk_total' => isset($summary['disk_total']) ? (int) $summary['disk_total'] : 0,
+            'disk_used_pct' => isset($summary['disk_used_pct']) ? (float) $summary['disk_used_pct'] : null,
             'ipv4' => statuspigeon_host_ip_list($agentIPv4, $row['remote_ip'], 4),
             'ipv6' => statuspigeon_host_ip_list($agentIPv6, $row['remote_ip'], 6),
             'source' => (string) $row['source'],
@@ -617,8 +636,8 @@ function statuspigeon_recent_reports($pdo, $limit)
 {
     $limit = max(1, min(500, (int) $limit));
     $query = $pdo->query(
-        'SELECT metrics_raw.ts, metrics_raw.cpu_usage, metrics_raw.mem_usage,
-                metrics_raw.load1, hosts.hostname, hosts.last_status
+        'SELECT metrics_raw.ts, metrics_raw.mem_usage, metrics_raw.load1,
+                hosts.hostname, hosts.last_status
          FROM metrics_raw
          INNER JOIN hosts ON hosts.id = metrics_raw.host_id
          ORDER BY metrics_raw.ts DESC, metrics_raw.id DESC
@@ -667,18 +686,23 @@ function statuspigeon_daily($pdo, $hostId, $days)
 function statuspigeon_metrics_series($pdo, $hostId, $fromTs)
 {
     $stmt = $pdo->prepare(
-        'SELECT ts, cpu_usage, mem_usage, load1
+        'SELECT ts, mem_usage, load1, payload
          FROM metrics_raw
          WHERE host_id=:host_id AND ts >= :from_ts ORDER BY ts ASC LIMIT 10000'
     );
     $stmt->execute(array(':host_id' => (int) $hostId, ':from_ts' => (int) $fromTs));
     $out = array();
     foreach ($stmt->fetchAll() as $row) {
+        $payload = json_decode((string) $row['payload'], true);
+        $payload = is_array($payload) ? $payload : array();
+        $os = isset($payload['metrics']['os']) && is_array($payload['metrics']['os'])
+            ? $payload['metrics']['os'] : array();
         $out[] = array(
             'ts' => (int) $row['ts'],
-            'cpu' => $row['cpu_usage'] === null ? null : (float) $row['cpu_usage'],
             'mem' => $row['mem_usage'] === null ? null : (float) $row['mem_usage'],
             'load1' => $row['load1'] === null ? null : (float) $row['load1'],
+            'disk_used_pct' => isset($os['disk_used_pct'])
+                ? statuspigeon_metric_number($os['disk_used_pct'], 0) : null,
         );
     }
     return $out;

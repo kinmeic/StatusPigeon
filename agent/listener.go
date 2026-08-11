@@ -15,8 +15,8 @@ import (
 	"time"
 )
 
-// metricsCacheTTL 采集结果缓存时长。CPU 使用率采样本身阻塞约 500ms，
-// 缓存可避免公网上的并发请求触发采集放大（DoS 缓解）。
+// metricsCacheTTL 采集结果缓存时长。缓存可避免公网上的并发请求触发
+// 采集放大（DoS 缓解）。
 const metricsCacheTTL = 5 * time.Second
 
 // Listener pull 模式服务端，按需采集并返回最新 Report。

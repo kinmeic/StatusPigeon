@@ -49,6 +49,25 @@
     return Array.isArray(value) && value.length ? value.join('\n') : '—';
   }
 
+  function formatBytes(value) {
+    var number = Number(value);
+    if (!isFinite(number) || number <= 0) return '—';
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var index = 0;
+    while (number >= 1024 && index < units.length - 1) {
+      number /= 1024;
+      index++;
+    }
+    var precision = index === 0 ? 0 : (number >= 10 ? 1 : 2);
+    return number.toFixed(precision) + ' ' + units[index];
+  }
+
+  function formatPercent(value) {
+    if (value === null || value === undefined || value === '') return '—';
+    var number = Number(value);
+    return isFinite(number) ? number.toFixed(1) + '%' : '—';
+  }
+
   function loadHeader() {
     return fetch('api/hosts.php').then(function (response) { return response.json(); }).then(function (hosts) {
       var host = hosts.filter(function (item) { return String(item.id) === String(hostId); })[0];
@@ -68,6 +87,16 @@
       setText('host-os-version', host.os_version || summary.os_version || '—');
       setText('host-kernel', host.kernel || '—');
       setText('host-arch', host.arch || '—');
+      setText('host-cpu-model', host.cpu_model || summary.cpu_model || '—');
+      setText('host-memory-total', formatBytes(
+        host.memory_total || summary.memory_total
+      ));
+      setText('host-disk-total', formatBytes(
+        host.disk_total || summary.disk_total
+      ));
+      var diskUsedPct = host.disk_used_pct !== null && host.disk_used_pct !== undefined
+        ? host.disk_used_pct : summary.disk_used_pct;
+      setText('host-disk-used-pct', formatPercent(diskUsedPct));
       setText('host-uptime', formatDuration(summary.uptime));
       setText('host-last-report', formatTimestamp(host.last_seen));
       setText('host-ipv4', formatIPList(host.ipv4 || summary.ipv4));
@@ -262,9 +291,9 @@
     fetch('api/metrics.php?id=' + encodeURIComponent(hostId) + '&range=' + encodeURIComponent(range))
       .then(function (response) { return response.ok ? response.json() : []; })
       .then(function (points) {
-        chart('chart-cpu', points, 'cpu', '#3498db', true, 'CPU 使用率');
-        chart('chart-mem', points, 'mem', '#9b59b6', true, '内存使用率');
         chart('chart-load', points, 'load1', '#e67e22', false, '系统负载');
+        chart('chart-mem', points, 'mem', '#9b59b6', true, '内存使用率');
+        chart('chart-disk', points, 'disk_used_pct', '#2ecc71', true, '磁盘占用率');
       });
   }
 

@@ -11,6 +11,9 @@ OpenWrt LuCI app for the Status Pigeon push-only agent. The package uses the cur
   including a stable hashed `device_id`; `hostname` is only a display label.
   IPv4/IPv6 values include the logical interface when available (for example
   `192.168.0.68@usbwan`), with WAN-like interfaces reported before LAN ones.
+- Reports include load averages, memory totals, CPU model, root filesystem
+  size and root filesystem usage. CPU percentage is intentionally not sampled
+  or transmitted.
 - No listen mode, inbound port, URL rewrite, `jq`, or resident HTTP server.
 
 ## Build and install

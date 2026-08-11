@@ -126,6 +126,6 @@ func collectAndReport(c *Collector, r *Reporter) {
 		log.Printf("上报失败: %v", err)
 		return
 	}
-	log.Printf("上报成功 | cpu=%.1f%% mem=%.1f%% load1=%.2f",
-		report.Metrics.Cpu.Usage, report.Metrics.Mem.UsedPct, report.Metrics.Cpu.Load1)
+	log.Printf("上报成功 | mem=%.1f%% load1=%.2f",
+		report.Metrics.Mem.UsedPct, report.Metrics.Cpu.Load1)
 }

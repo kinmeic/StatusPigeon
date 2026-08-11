@@ -52,10 +52,8 @@
     let meta = '';
     try {
       const s = JSON.parse(h.last_summary || '{}');
-      const ips = [...(s.ipv4 || []), ...(s.ipv6 || [])].join(', ');
-      meta = [s.os, 'CPU ' + (s.cpu != null ? s.cpu.toFixed(0) + '%' : '-'),
-              'MEM ' + (s.mem != null ? s.mem.toFixed(0) + '%' : '-'),
-              ips ? 'IP ' + ips : '']
+      meta = [s.os, 'Load ' + (s.load1 != null ? s.load1.toFixed(2) : '-'),
+              'MEM ' + (s.mem != null ? s.mem.toFixed(0) + '%' : '-')]
         .filter(Boolean).join(' · ');
     } catch (e) { /* ignore */ }
 

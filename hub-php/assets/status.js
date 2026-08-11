@@ -30,14 +30,10 @@
   function summary(host) {
     var value = {};
     try { value = JSON.parse(host.last_summary || '{}'); } catch (ignored) {}
-    var ipv4 = Array.isArray(host.ipv4) ? host.ipv4 : (value.ipv4 || []);
-    var ipv6 = Array.isArray(host.ipv6) ? host.ipv6 : (value.ipv6 || []);
-    var ips = ipv4.concat(ipv6).join(', ');
     return [
       value.os,
-      value.cpu === undefined ? '' : 'CPU ' + Number(value.cpu).toFixed(1) + '%',
+      value.load1 === undefined ? '' : 'Load ' + Number(value.load1).toFixed(2),
       value.mem === undefined ? '' : 'MEM ' + Number(value.mem).toFixed(1) + '%',
-      ips ? 'IP ' + ips : ''
     ].filter(Boolean).join(' · ');
   }
 

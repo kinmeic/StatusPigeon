@@ -38,7 +38,7 @@ type Config struct {
 	UptimeBarDays int `yaml:"uptime_bar_days"` // 状态页色块条天数，默认 90
 
 	// 状态判定阈值
-	DegradedCPU float64 `yaml:"degraded_cpu"` // CPU % ，默认 90
+	DegradedCPU float64 `yaml:"degraded_cpu"` // 已废弃，保留旧配置兼容
 	DegradedMem float64 `yaml:"degraded_mem"` // 内存 % ，默认 95
 
 	// 失联判定（用于 push 主机）

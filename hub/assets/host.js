@@ -1,4 +1,4 @@
-// host.js — 主机详情页：CPU / 内存 / 负载趋势图（Chart.js）。
+// host.js — 主机详情页：负载 / 内存趋势图（Chart.js）。
 (function () {
   'use strict';
 
@@ -70,13 +70,11 @@
 
     const labels = pts.map((p) =>
       new Date(p.ts * 1000).toLocaleString('zh-CN', { hour12: false }));
-    const cpu = pts.map((p) => p.cpu);
     const mem = pts.map((p) => p.mem);
     const load = pts.map((p) => p.load1);
 
-    draw('chart-cpu', 'CPU', '#3498db', labels, cpu, true);
-    draw('chart-mem', '内存', '#9b59b6', labels, mem, true);
     draw('chart-load', '负载', '#e67e22', labels, load, false);
+    draw('chart-mem', '内存', '#9b59b6', labels, mem, true);
   }
 
   function draw(canvasId, label, color, labels, data, pct) {

@@ -29,7 +29,7 @@ retention_days: 90
 uptime_bar_days: 90   # 状态页色块条展示天数
 
 # ====== 状态判定阈值 ======
-degraded_cpu: 90.0    # CPU % 超过则 degraded
+degraded_cpu: 90.0    # 已废弃，保留用于兼容旧配置；CPU 使用率不再采集
 degraded_mem: 95.0    # 内存 % 超过则 degraded
 
 # ====== 失联判定（push 主机） ======
