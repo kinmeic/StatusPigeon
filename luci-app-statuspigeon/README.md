@@ -35,6 +35,8 @@ The recommended endpoint is `https://example.com/report/`. The app also accepts 
 
 The package needs `curl`, `ca-bundle` for HTTPS verification, libubox `jshn`, and OpenWrt's `jsonfilter` (provided by the declared dependencies). Interface addresses are read from `ubus` network status first, with `ip`/`ifconfig` fallbacks. The LuCI page shows the last attempt, last successful submission, reason, and HTTP status. It also provides a `Report Now` button.
 
+Package installation and upgrades do not restart `rpcd`, so an active LuCI session is not invalidated. On a fresh installation, restart `rpcd` manually once if the new ACL is not recognized immediately.
+
 A one-shot report can also be triggered with:
 
 ```sh

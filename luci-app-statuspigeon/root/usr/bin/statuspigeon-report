@@ -129,7 +129,7 @@ trap 'rm -rf /tmp/statuspigeon-report.lock' EXIT HUP INT TERM
 
 hostname="${hostname:-$(cat /proc/sys/kernel/hostname 2>/dev/null || uname -n)}"
 agent_version="$(get_uci statuspigeon.main.agent_version)"
-agent_version="${agent_version:-luci-app-statuspigeon/1.0.5}"
+agent_version="${agent_version:-luci-app-statuspigeon/1.0.6}"
 uptime="$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)"
 kernel="$(uname -r 2>/dev/null || echo unknown)"
 arch="$(uname -m 2>/dev/null || echo unknown)"
@@ -231,7 +231,9 @@ json_add_ip_array() {
 	values="$2"
 	json_add_array "$key"
 	for address in $values; do
-		[ -n "$address" ] && json_push_string "$address"
+		# jshn represents an array string with an empty member name.  The
+		# json_push_string helper is not available on OpenWrt 24.10.
+		[ -n "$address" ] && json_add_string '' "$address"
 	done
 	json_close_array
 }
@@ -247,11 +249,13 @@ collect_ubus_ip_addresses() {
 	network_json="$(ubus call network.interface dump 2>/dev/null)"
 	[ -n "$network_json" ] || return 0
 
-	ipv4_values="$(printf '%s\n' "$network_json" | jsonfilter -e "@.interface[*]['ipv4-address'][*].address" 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
-	ipv6_values="$(printf '%s\n' "$network_json" | jsonfilter -e "@.interface[*]['ipv6-address'][*].address" 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
+	ipv4_values="$(printf '%s\n' "$network_json" | jsonfilter -e '@.interface[*]["ipv4-address"][*].address' 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
+	ipv6_values="$(printf '%s\n' "$network_json" | jsonfilter -e '@.interface[*]["ipv6-address"][*].address' 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
+	ipv6_prefix_values="$(printf '%s\n' "$network_json" | jsonfilter -e '@.interface[*]["ipv6-prefix-assignment"][*]["local-address"].address' 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
 
 	[ -n "$ipv4_values" ] && printf '%s\n' "$ipv4_values" | awk '{ print "inet", $0 }'
 	[ -n "$ipv6_values" ] && printf '%s\n' "$ipv6_values" | awk '{ print "inet6", $0 }'
+	[ -n "$ipv6_prefix_values" ] && printf '%s\n' "$ipv6_prefix_values" | awk '{ print "inet6", $0 }'
 }
 
 collect_ip_addresses() {
