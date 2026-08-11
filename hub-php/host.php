@@ -28,8 +28,6 @@ statuspigeon_admin_require_page();
         <div class="chart-box"><h3>CPU 使用率 (%)</h3><div id="chart-cpu" class="chart"></div></div>
         <div class="chart-box"><h3>内存使用率 (%)</h3><div id="chart-mem" class="chart"></div></div>
         <div class="chart-box"><h3>系统负载 (load1)</h3><div id="chart-load" class="chart"></div></div>
-        <div class="chart-box"><h3>磁盘 I/O（KB/s，自动换算）</h3><div id="chart-disk" class="chart"></div></div>
-        <div class="chart-box"><h3>网络速度（KB/s，自动换算）</h3><div id="chart-network" class="chart"></div></div>
       </main>
       <aside class="detail-sidebar">
         <section class="info-card">

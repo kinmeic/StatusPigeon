@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-statuspigeon
-PKG_VERSION:=1.0.3
+PKG_VERSION:=1.0.4
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=Status Pigeon contributors
@@ -24,6 +24,18 @@ endef
 
 define Package/luci-app-statuspigeon/conffiles
 /etc/config/statuspigeon
+endef
+
+# rpcd loads ACL definitions into the running session service.  Reload it
+# after an on-device package upgrade so the report/status commands are
+# immediately callable from the LuCI page instead of requiring a manual
+# daemon restart and leaving an old session with stale permissions.
+define Package/luci-app-statuspigeon/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || {
+	[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd restart >/dev/null 2>&1 || true
+}
+exit 0
 endef
 
 define Package/luci-app-statuspigeon/install

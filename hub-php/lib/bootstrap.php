@@ -11,7 +11,10 @@ $config = array(
     'admin_password_hash' => '',
     'public_base_url' => '',
     'db_path' => dirname(__DIR__) . '/../statuspigeon-data/statuspigeon.sqlite',
-    'timezone' => 'UTC',
+    // The Hub displays report timestamps in the operator's local timezone.
+    // Deployments can still override this value in config.php or with
+    // STATUSPIGEON_TIMEZONE.
+    'timezone' => 'Asia/Shanghai',
     'retention_days' => 90,
     'uptime_bar_days' => 60,
     'degraded_cpu' => 90.0,

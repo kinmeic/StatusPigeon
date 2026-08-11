@@ -1,26 +1,29 @@
-// Package main: collector.go — collect system, CPU, memory and I/O metrics.
+// Package main: collector.go — collect system, CPU and memory metrics.
 //
 // Collected values include:
 //   - system: OS, kernel, architecture, uptime and IP addresses
 //   - CPU: load averages and usage percentage
 //   - memory: total, used, available and swap
-//   - disk and network counters plus rates calculated between samples
+//
+// Disk and network throughput are deliberately not sampled: a single
+// instantaneous rate is not useful as a long-term status trend.
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
+	"os"
 	"runtime"
+	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/load"
 	"github.com/shirou/gopsutil/v3/mem"
-	gopsutilnet "github.com/shirou/gopsutil/v3/net"
 
 	pkgmetrics "github.com/statuspigeon/metrics"
 )
@@ -28,21 +31,10 @@ import (
 // AgentVersion 编译期注入（见 Makefile -ldflags）。
 var AgentVersion = "dev"
 
-// Collector collects metrics. I/O counters are retained between samples so
-// the report can include bytes-per-second values without adding a second
-// blocking sampling interval.
+// Collector collects the stable system, CPU and memory metrics.
 type Collector struct {
 	hostname string
-	ioMu     sync.Mutex
-	previous *ioSnapshot
-}
-
-type ioSnapshot struct {
-	at        time.Time
-	diskRead  uint64
-	diskWrite uint64
-	netRx     uint64
-	netTx     uint64
+	deviceID string
 }
 
 // NewCollector creates a collector. An empty hostname uses the system name.
@@ -54,7 +46,7 @@ func NewCollector(hostname string) (*Collector, error) {
 		}
 		hostname = info.Hostname
 	}
-	return &Collector{hostname: hostname}, nil
+	return &Collector{hostname: hostname, deviceID: stableDeviceID(hostname)}, nil
 }
 
 // Hostname returns the collector hostname.
@@ -64,6 +56,7 @@ func (c *Collector) Hostname() string { return c.hostname }
 func (c *Collector) Collect() (*pkgmetrics.Report, error) {
 	report := &pkgmetrics.Report{
 		AgentVersion: AgentVersion,
+		DeviceID:     c.deviceID,
 		Hostname:     c.hostname,
 		Timestamp:    time.Now().Unix(),
 	}
@@ -76,8 +69,54 @@ func (c *Collector) Collect() (*pkgmetrics.Report, error) {
 	if err := collectMem(&report.Metrics.Mem); err != nil {
 		return nil, err
 	}
-	c.collectIO(&report.Metrics.Disk, &report.Metrics.Network)
 	return report, nil
+}
+
+// stableDeviceID returns a non-secret hash of the most hardware-specific
+// identity available on the host.  Device-tree/DMI identifiers are preferred;
+// machine-id and a stable interface MAC are portable fallbacks.  The Hub uses
+// this value as the identity key while keeping Hostname user-editable.
+func stableDeviceID(hostname string) string {
+	paths := []string{
+		"/sys/firmware/devicetree/base/serial-number",
+		"/proc/device-tree/serial-number",
+		"/sys/class/dmi/id/product_uuid",
+		"/sys/devices/virtual/dmi/id/product_uuid",
+		"/etc/machine-id",
+	}
+	for _, path := range paths {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		value := strings.Trim(strings.TrimSpace(string(contents)), "\x00")
+		if value != "" {
+			return hashDeviceIdentity(path + ":" + value)
+		}
+	}
+
+	var macs []string
+	if interfaces, err := net.Interfaces(); err == nil {
+		for _, iface := range interfaces {
+			if iface.Flags&net.FlagLoopback != 0 || len(iface.HardwareAddr) == 0 {
+				continue
+			}
+			macs = append(macs, strings.ToLower(iface.HardwareAddr.String()))
+		}
+	}
+	if len(macs) > 0 {
+		sort.Strings(macs)
+		return hashDeviceIdentity("mac:" + macs[0])
+	}
+
+	// This last-resort path is stable for a configured hostname but is not
+	// expected on normal OpenWrt/Linux systems with one of the sources above.
+	return hashDeviceIdentity("hostname:" + hostname)
+}
+
+func hashDeviceIdentity(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func collectOs(out *pkgmetrics.OsInfo) error {
@@ -155,43 +194,4 @@ func collectMem(out *pkgmetrics.MemInfo) error {
 		out.SwapUsed = sm.Used
 	}
 	return nil
-}
-
-func (c *Collector) collectIO(diskOut *pkgmetrics.DiskIOInfo, networkOut *pkgmetrics.NetworkIOInfo) {
-	snapshot := ioSnapshot{at: time.Now()}
-	if counters, err := disk.IOCounters(); err == nil {
-		for _, counter := range counters {
-			snapshot.diskRead += counter.ReadBytes
-			snapshot.diskWrite += counter.WriteBytes
-		}
-	}
-	if counters, err := gopsutilnet.IOCounters(false); err == nil && len(counters) > 0 {
-		snapshot.netRx = counters[0].BytesRecv
-		snapshot.netTx = counters[0].BytesSent
-	}
-
-	diskOut.ReadBytes = snapshot.diskRead
-	diskOut.WriteBytes = snapshot.diskWrite
-	networkOut.RxBytes = snapshot.netRx
-	networkOut.TxBytes = snapshot.netTx
-
-	c.ioMu.Lock()
-	if c.previous != nil {
-		seconds := snapshot.at.Sub(c.previous.at).Seconds()
-		if seconds > 0 {
-			diskOut.ReadBps = counterRate(snapshot.diskRead, c.previous.diskRead, seconds)
-			diskOut.WriteBps = counterRate(snapshot.diskWrite, c.previous.diskWrite, seconds)
-			networkOut.RxBps = counterRate(snapshot.netRx, c.previous.netRx, seconds)
-			networkOut.TxBps = counterRate(snapshot.netTx, c.previous.netTx, seconds)
-		}
-	}
-	c.previous = &snapshot
-	c.ioMu.Unlock()
-}
-
-func counterRate(current, previous uint64, seconds float64) float64 {
-	if current <= previous || seconds <= 0 {
-		return 0
-	}
-	return float64(current-previous) / seconds
 }

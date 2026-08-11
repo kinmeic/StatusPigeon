@@ -138,7 +138,7 @@ opkg install luci-app-statuspigeon_*.ipk
 
 | 类别 | 字段 |
 |------|------|
-| 基础 | os、kernel、arch、uptime |
+| 基础 | device_id、os、os_version、kernel、arch、uptime、IPv4/IPv6 |
 | CPU | usage%、load1/5/15 |
 | 内存 | total/used/available、used_pct、swap_total/swap_used |
 
@@ -181,6 +181,8 @@ opkg install luci-app-statuspigeon_*.ipk
 | `listen_addr` | `:9527` | listen：监听地址 |
 
 > 所有配置项均可通过 `STATUSPIGEON_*` 环境变量覆盖。
+
+Hub 使用 report 中的 `device_id` 作为设备唯一身份，`hostname` 仅作为可修改的显示名称。OpenWrt agent 会优先使用设备树序列号或 DMI product UUID，再以 machine-id/MAC 作为后备，并在上报前做哈希处理。
 
 ## 安全建议
 

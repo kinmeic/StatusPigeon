@@ -33,7 +33,8 @@ function statuspigeon_db($config)
     $schema = array(
         'CREATE TABLE IF NOT EXISTS hosts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            hostname TEXT UNIQUE NOT NULL,
+            device_id TEXT UNIQUE NOT NULL,
+            hostname TEXT NOT NULL,
             agent_version TEXT,
             os TEXT,
             kernel TEXT,
@@ -51,10 +52,6 @@ function statuspigeon_db($config)
             cpu_usage REAL,
             mem_usage REAL,
             load1 REAL,
-            disk_read_bps REAL,
-            disk_write_bps REAL,
-            network_rx_bps REAL,
-            network_tx_bps REAL,
             payload TEXT NOT NULL,
             FOREIGN KEY(host_id) REFERENCES hosts(id)
         )',
@@ -75,23 +72,90 @@ function statuspigeon_db($config)
     foreach ($schema as $statement) {
         $pdo->exec($statement);
     }
-    // Add the I/O columns to databases created by earlier versions.
-    statuspigeon_ensure_column($pdo, 'metrics_raw', 'disk_read_bps', 'REAL');
-    statuspigeon_ensure_column($pdo, 'metrics_raw', 'disk_write_bps', 'REAL');
-    statuspigeon_ensure_column($pdo, 'metrics_raw', 'network_rx_bps', 'REAL');
-    statuspigeon_ensure_column($pdo, 'metrics_raw', 'network_tx_bps', 'REAL');
+    statuspigeon_migrate_host_identity($pdo);
+    // Existing databases may still contain legacy I/O columns.  They are
+    // intentionally left in place for non-destructive upgrades, but no new
+    // report reads or writes those columns.
     return $pdo;
 }
 
-function statuspigeon_ensure_column($pdo, $table, $column, $definition)
+function statuspigeon_migrate_host_identity($pdo)
 {
-    $columns = $pdo->query('PRAGMA table_info(' . $table . ')')->fetchAll();
-    foreach ($columns as $item) {
-        if (isset($item['name']) && $item['name'] === $column) {
-            return;
+    $columns = $pdo->query('PRAGMA table_info(hosts)')->fetchAll();
+    $columnNames = array();
+    foreach ($columns as $column) {
+        if (isset($column['name'])) {
+            $columnNames[(string) $column['name']] = true;
         }
     }
-    $pdo->exec('ALTER TABLE ' . $table . ' ADD COLUMN ' . $column . ' ' . $definition);
+    $hasDeviceId = isset($columnNames['device_id']);
+    if ($hasDeviceId && !statuspigeon_hosts_have_unique_hostname($pdo)) {
+        return;
+    }
+
+    $pdo->exec('PRAGMA foreign_keys=OFF');
+    try {
+        $pdo->beginTransaction();
+        $pdo->exec(
+            'CREATE TABLE hosts_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                agent_version TEXT,
+                os TEXT,
+                kernel TEXT,
+                arch TEXT,
+                last_seen INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                last_status TEXT,
+                last_summary TEXT,
+                source TEXT NOT NULL DEFAULT \'push\'
+            )'
+        );
+        $deviceExpression = $hasDeviceId
+            ? "CASE WHEN device_id IS NULL OR device_id = '' THEN ('legacy-hostname:' || hostname) ELSE device_id END"
+            : "('legacy-hostname:' || hostname)";
+        $pdo->exec(
+            'INSERT INTO hosts_new
+             (id, device_id, hostname, agent_version, os, kernel, arch, last_seen,
+              created_at, last_status, last_summary, source)
+             SELECT id, ' . $deviceExpression . ', hostname, agent_version, os,
+                    kernel, arch, last_seen, created_at, last_status, last_summary,
+                    source FROM hosts'
+        );
+        $pdo->exec('DROP TABLE hosts');
+        $pdo->exec('ALTER TABLE hosts_new RENAME TO hosts');
+        $pdo->exec('CREATE UNIQUE INDEX idx_hosts_device_id ON hosts(device_id)');
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_hosts_hostname ON hosts(hostname)');
+        $pdo->commit();
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    } finally {
+        $pdo->exec('PRAGMA foreign_keys=ON');
+    }
+}
+
+function statuspigeon_hosts_have_unique_hostname($pdo)
+{
+    $indexes = $pdo->query('PRAGMA index_list(hosts)')->fetchAll();
+    foreach ($indexes as $index) {
+        if (!isset($index['unique']) || (int) $index['unique'] !== 1) {
+            continue;
+        }
+        $name = isset($index['name']) ? (string) $index['name'] : '';
+        if ($name === '') {
+            continue;
+        }
+        $quoted = '"' . str_replace('"', '""', $name) . '"';
+        $info = $pdo->query('PRAGMA index_info(' . $quoted . ')')->fetchAll();
+        if (count($info) === 1 && isset($info[0]['name']) && $info[0]['name'] === 'hostname') {
+            return true;
+        }
+    }
+    return false;
 }
 
 function statuspigeon_metric_number($value, $default)
@@ -144,13 +208,10 @@ function statuspigeon_normalize_report($input)
         ? $rawMetrics['cpu'] : array();
     $rawMem = isset($rawMetrics['mem']) && is_array($rawMetrics['mem'])
         ? $rawMetrics['mem'] : array();
-    $rawDisk = isset($rawMetrics['disk']) && is_array($rawMetrics['disk'])
-        ? $rawMetrics['disk'] : array();
-    $rawNetwork = isset($rawMetrics['network']) && is_array($rawMetrics['network'])
-        ? $rawMetrics['network'] : array();
 
     return array(
         'agent_version' => statuspigeon_string(isset($input['agent_version']) ? $input['agent_version'] : '', ''),
+        'device_id' => statuspigeon_string(isset($input['device_id']) ? $input['device_id'] : '', ''),
         'hostname' => statuspigeon_string(isset($input['hostname']) ? $input['hostname'] : '', ''),
         'timestamp' => statuspigeon_metric_int(isset($input['timestamp']) ? $input['timestamp'] : 0, 0),
         'metrics' => array(
@@ -177,20 +238,17 @@ function statuspigeon_normalize_report($input)
                 'swap_total' => statuspigeon_metric_int(isset($rawMem['swap_total']) ? $rawMem['swap_total'] : 0, 0),
                 'swap_used' => statuspigeon_metric_int(isset($rawMem['swap_used']) ? $rawMem['swap_used'] : 0, 0),
             ),
-            'disk' => array(
-                'read_bytes' => statuspigeon_metric_int(isset($rawDisk['read_bytes']) ? $rawDisk['read_bytes'] : 0, 0),
-                'write_bytes' => statuspigeon_metric_int(isset($rawDisk['write_bytes']) ? $rawDisk['write_bytes'] : 0, 0),
-                'read_bps' => isset($rawDisk['read_bps']) ? statuspigeon_metric_number($rawDisk['read_bps'], 0) : null,
-                'write_bps' => isset($rawDisk['write_bps']) ? statuspigeon_metric_number($rawDisk['write_bps'], 0) : null,
-            ),
-            'network' => array(
-                'rx_bytes' => statuspigeon_metric_int(isset($rawNetwork['rx_bytes']) ? $rawNetwork['rx_bytes'] : 0, 0),
-                'tx_bytes' => statuspigeon_metric_int(isset($rawNetwork['tx_bytes']) ? $rawNetwork['tx_bytes'] : 0, 0),
-                'rx_bps' => isset($rawNetwork['rx_bps']) ? statuspigeon_metric_number($rawNetwork['rx_bps'], 0) : null,
-                'tx_bps' => isset($rawNetwork['tx_bps']) ? statuspigeon_metric_number($rawNetwork['tx_bps'], 0) : null,
-            ),
         ),
     );
+}
+
+function statuspigeon_report_device_id($report)
+{
+    $deviceID = isset($report['device_id']) ? trim((string) $report['device_id']) : '';
+    if ($deviceID !== '') {
+        return $deviceID;
+    }
+    return 'legacy-hostname:' . (isset($report['hostname']) ? trim((string) $report['hostname']) : '');
 }
 
 function statuspigeon_status_for_report($report, $config)
@@ -235,34 +293,53 @@ function statuspigeon_ingest($pdo, $report, $config)
     $now = time();
     $date = date('Y-m-d', $report['timestamp']);
     $payload = statuspigeon_json_encode($report);
+    $deviceId = statuspigeon_report_device_id($report);
 
     $pdo->beginTransaction();
     try {
-        // INSERT OR IGNORE keeps this compatible with older SQLite builds than
-        // the UPSERT syntax used by the Go implementation.
-        $insertHost = $pdo->prepare(
-            'INSERT OR IGNORE INTO hosts
-             (hostname, agent_version, os, kernel, arch, last_seen, created_at,
-              last_status, last_summary, source)
-             VALUES (:hostname, :agent_version, :os, :kernel, :arch, :last_seen,
-                     :created_at, :last_status, :last_summary, :source)'
-        );
-        $insertHost->execute(array(
-            ':hostname' => $report['hostname'],
-            ':agent_version' => $report['agent_version'],
-            ':os' => $metrics['os']['os'],
-            ':kernel' => $metrics['os']['kernel'],
-            ':arch' => $metrics['os']['arch'],
-            ':last_seen' => $now,
-            ':created_at' => $now,
-            ':last_status' => $status,
-            ':last_summary' => $summary,
-            ':source' => 'push',
-        ));
-
-        $findHost = $pdo->prepare('SELECT id FROM hosts WHERE hostname = :hostname');
-        $findHost->execute(array(':hostname' => $report['hostname']));
+        $findHost = $pdo->prepare('SELECT id FROM hosts WHERE device_id = :device_id');
+        $findHost->execute(array(':device_id' => $deviceId));
         $hostId = (int) $findHost->fetchColumn();
+        if ($hostId <= 0) {
+            // Adopt a legacy row when the first device-aware report arrives
+            // after an agent upgrade, preserving its existing history.
+            $findLegacy = $pdo->prepare(
+                'SELECT id FROM hosts
+                 WHERE device_id = :legacy_id AND hostname = :hostname'
+            );
+            $findLegacy->execute(array(
+                ':legacy_id' => 'legacy-hostname:' . $report['hostname'],
+                ':hostname' => $report['hostname'],
+            ));
+            $hostId = (int) $findLegacy->fetchColumn();
+            if ($hostId > 0) {
+                $adopt = $pdo->prepare('UPDATE hosts SET device_id=:device_id WHERE id=:id');
+                $adopt->execute(array(':device_id' => $deviceId, ':id' => $hostId));
+            }
+        }
+        if ($hostId <= 0) {
+            $insertHost = $pdo->prepare(
+                'INSERT INTO hosts
+                 (device_id, hostname, agent_version, os, kernel, arch, last_seen,
+                  created_at, last_status, last_summary, source)
+                 VALUES (:device_id, :hostname, :agent_version, :os, :kernel, :arch,
+                         :last_seen, :created_at, :last_status, :last_summary, :source)'
+            );
+            $insertHost->execute(array(
+                ':device_id' => $deviceId,
+                ':hostname' => $report['hostname'],
+                ':agent_version' => $report['agent_version'],
+                ':os' => $metrics['os']['os'],
+                ':kernel' => $metrics['os']['kernel'],
+                ':arch' => $metrics['os']['arch'],
+                ':last_seen' => $now,
+                ':created_at' => $now,
+                ':last_status' => $status,
+                ':last_summary' => $summary,
+                ':source' => 'push',
+            ));
+            $hostId = (int) $pdo->lastInsertId();
+        }
         if ($hostId <= 0) {
             throw new RuntimeException('Unable to create host record');
         }
@@ -286,10 +363,8 @@ function statuspigeon_ingest($pdo, $report, $config)
 
         $insertMetric = $pdo->prepare(
             'INSERT INTO metrics_raw
-             (host_id, ts, cpu_usage, mem_usage, load1, disk_read_bps,
-              disk_write_bps, network_rx_bps, network_tx_bps, payload)
-             VALUES (:host_id, :ts, :cpu, :mem, :load1, :disk_read_bps,
-                     :disk_write_bps, :network_rx_bps, :network_tx_bps, :payload)'
+             (host_id, ts, cpu_usage, mem_usage, load1, payload)
+             VALUES (:host_id, :ts, :cpu, :mem, :load1, :payload)'
         );
         $insertMetric->execute(array(
             ':host_id' => $hostId,
@@ -297,10 +372,6 @@ function statuspigeon_ingest($pdo, $report, $config)
             ':cpu' => $metrics['cpu']['usage'],
             ':mem' => $metrics['mem']['used_pct'],
             ':load1' => $metrics['cpu']['load1'],
-            ':disk_read_bps' => $metrics['disk']['read_bps'],
-            ':disk_write_bps' => $metrics['disk']['write_bps'],
-            ':network_rx_bps' => $metrics['network']['rx_bps'],
-            ':network_tx_bps' => $metrics['network']['tx_bps'],
             ':payload' => $payload,
         ));
 
@@ -437,7 +508,7 @@ function statuspigeon_maintenance($pdo, $config)
 function statuspigeon_hosts($pdo)
 {
     $query = $pdo->query(
-        'SELECT id, hostname, COALESCE(os, \'\') AS os,
+        'SELECT id, COALESCE(device_id, \'\') AS device_id, hostname, COALESCE(os, \'\') AS os,
                 COALESCE(kernel, \'\') AS kernel, COALESCE(arch, \'\') AS arch,
                 COALESCE(agent_version, \'\') AS agent_version, last_seen,
                 COALESCE(last_status, \'\') AS last_status,
@@ -450,6 +521,7 @@ function statuspigeon_hosts($pdo)
         $summary = is_array($summary) ? $summary : array();
         $out[] = array(
             'id' => (int) $row['id'],
+            'device_id' => (string) $row['device_id'],
             'hostname' => (string) $row['hostname'],
             'os' => (string) $row['os'],
             'kernel' => (string) $row['kernel'],
@@ -474,9 +546,7 @@ function statuspigeon_recent_reports($pdo, $limit)
     $limit = max(1, min(500, (int) $limit));
     $query = $pdo->query(
         'SELECT metrics_raw.ts, metrics_raw.cpu_usage, metrics_raw.mem_usage,
-                metrics_raw.load1, metrics_raw.disk_read_bps,
-                metrics_raw.disk_write_bps, metrics_raw.network_rx_bps,
-                metrics_raw.network_tx_bps, hosts.hostname, hosts.last_status
+                metrics_raw.load1, hosts.hostname, hosts.last_status
          FROM metrics_raw
          INNER JOIN hosts ON hosts.id = metrics_raw.host_id
          ORDER BY metrics_raw.ts DESC, metrics_raw.id DESC
@@ -525,8 +595,7 @@ function statuspigeon_daily($pdo, $hostId, $days)
 function statuspigeon_metrics_series($pdo, $hostId, $fromTs)
 {
     $stmt = $pdo->prepare(
-        'SELECT ts, cpu_usage, mem_usage, load1, disk_read_bps, disk_write_bps,
-                network_rx_bps, network_tx_bps
+        'SELECT ts, cpu_usage, mem_usage, load1
          FROM metrics_raw
          WHERE host_id=:host_id AND ts >= :from_ts ORDER BY ts ASC LIMIT 10000'
     );
@@ -538,10 +607,6 @@ function statuspigeon_metrics_series($pdo, $hostId, $fromTs)
             'cpu' => $row['cpu_usage'] === null ? null : (float) $row['cpu_usage'],
             'mem' => $row['mem_usage'] === null ? null : (float) $row['mem_usage'],
             'load1' => $row['load1'] === null ? null : (float) $row['load1'],
-            'disk_read_bps' => $row['disk_read_bps'] === null ? null : (float) $row['disk_read_bps'],
-            'disk_write_bps' => $row['disk_write_bps'] === null ? null : (float) $row['disk_write_bps'],
-            'network_rx_bps' => $row['network_rx_bps'] === null ? null : (float) $row['network_rx_bps'],
-            'network_tx_bps' => $row['network_tx_bps'] === null ? null : (float) $row['network_tx_bps'],
         );
     }
     return $out;

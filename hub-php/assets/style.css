@@ -122,7 +122,7 @@ body {
 .admin-form button, .admin-card button { border: 0; border-radius: 6px; padding: 9px 15px; background: var(--text); color: #fff; cursor: pointer; font: inherit; }
 .danger-button { background: #c0392b !important; }
 .inline-form { margin: 0; }
-.link-button { border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 0; font: inherit; }
+.link-button { border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 0; font: inherit; font-size: 13px; white-space: nowrap; }
 .admin-message { border-radius: 6px; padding: 11px 14px; margin-bottom: 16px; font-size: 13px; line-height: 1.6; }
 .admin-success { background: #e8f8ef; color: #1d7d46; }
 .admin-error { background: #fdecea; color: #c0392b; }
@@ -130,6 +130,8 @@ body {
 .api-key-value { display: block; overflow-wrap: anywhere; padding: 12px; border-radius: 6px; background: #f5f7fa; color: var(--text); font-size: 13px; line-height: 1.6; }
 .api-key-copy-row { display: flex; align-items: center; gap: 10px; }
 .api-key-copy-row .api-key-value { flex: 1; min-width: 0; }
+.api-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.api-actions form { margin: 0; }
 .copy-button { flex: 0 0 auto; white-space: nowrap; }
 .copy-status { min-height: 1.5em; margin: 7px 0 0; color: var(--muted); font-size: 12px; }
 .log-table-wrap { overflow-x: auto; }

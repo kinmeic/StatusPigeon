@@ -7,7 +7,8 @@ OpenWrt LuCI app for the Status Pigeon push-only agent. The package uses the cur
 - Configure the hub URL, API key, optional hostname, interval and timeout in LuCI.
 - Periodic reports through a procd-managed shell scheduler.
 - Extra push after `ifup`/`ifupdate` through `/etc/hotplug.d/iface/95-statuspigeon`.
-- JSON body matches `pkg/metrics.Report` used by the Go agent and PHP hub.
+- JSON body matches `pkg/metrics.Report` used by the Go agent and PHP hub,
+  including a stable hashed `device_id`; `hostname` is only a display label.
 - No listen mode, inbound port, URL rewrite, `jq`, or resident HTTP server.
 
 ## Build and install
@@ -32,7 +33,7 @@ opkg install luci-app-statuspigeon_*.ipk  # OpenWrt 24.10 and older
 
 The recommended endpoint is `https://example.com/report/`. The app also accepts `https://example.com/report/index.php`, `/report`, or the Hub base URL. The reporter normalizes the latter two to `/report/`; the explicit `index.php` path remains supported for hosts without a directory index.
 
-The package needs `curl`, `ca-bundle` for HTTPS verification, and libubox `jshn` (provided by the declared dependencies). The LuCI page shows the last attempt, last successful submission, reason, and HTTP status. It also provides a `Submit now` button.
+The package needs `curl`, `ca-bundle` for HTTPS verification, and libubox `jshn` (provided by the declared dependencies). The LuCI page shows the last attempt, last successful submission, reason, and HTTP status. It also provides a `Report Now` button.
 
 A one-shot report can also be triggered with:
 

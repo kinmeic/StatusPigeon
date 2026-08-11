@@ -81,7 +81,7 @@ Agent 主动向 Hub 发起 HTTP POST 上报。**能穿透 NAT**，是家用机�
 
 三张表：
 
-- **hosts** — 主机注册表 + 缓存的最新状态/摘要（状态页直读，无需聚合查询）
+- **hosts** — 设备注册表（`device_id` 唯一）+ 可修改的 Hostname 显示名 + 缓存的最新状态/摘要（状态页直读，无需聚合查询）
 - **metrics_raw** — 全量原始指标，详情页趋势图用；按 `host_id, ts` 索引
 - **uptime_daily** — 按天聚合，状态页 90 天色块条专用（查询极快）
 
@@ -127,3 +127,4 @@ PHP Hub 的实际文件路径（不需要地址重写）：
 2. **embed 打包前端**：HTML/CSS/JS 通过 `//go:embed` 打进 Hub 二进制，部署只需一个文件。
 3. **共享 metrics 包**：Agent 与 Hub 引用同一份结构定义，避免数据契约漂移。
 4. **缓存最新状态**：`hosts.last_status/last_summary` 让状态页无需实时聚合即可展示当前状态。
+5. **设备身份与显示名称分离**：Hub 按稳定的 `device_id` 更新设备，Hostname 只用于用户识别；更换 Hostname 不会产生新设备，同名的不同设备也不会互相覆盖。

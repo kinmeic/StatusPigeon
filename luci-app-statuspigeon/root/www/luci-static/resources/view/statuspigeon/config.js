@@ -85,24 +85,34 @@ function parseStatusFile(contents) {
 	return data;
 }
 
-function refreshStatus() {
-	return fs.exec('/usr/bin/statuspigeon-status', [], null).then(function (result) {
-		if (result.code !== 0)
-			throw new Error(result.stderr || _('Status command failed'));
+function parseStatusResult(result) {
+	if (result.code !== 0)
+		throw new Error(result.stderr || _('Status command failed'));
 
-		var data;
-		try {
-			data = JSON.parse(result.stdout || '{}');
-		} catch (error) {
-			throw new Error(_('Invalid status response'));
-		}
+	try {
+		return JSON.parse(result.stdout || '{}');
+	} catch (error) {
+		throw new Error(_('Invalid status response'));
+	}
+}
+
+function readStatusCommand(command, args) {
+	return fs.exec(command, args || [], null).then(parseStatusResult);
+}
+
+function refreshStatus() {
+	return readStatusCommand('/usr/bin/statuspigeon-report', [ 'status' ]).then(function (data) {
 		renderStatus(data);
 		return data;
-	}, function (error) {
+	}, function (reportError) {
+		return readStatusCommand('/usr/bin/statuspigeon-status', []).then(function (data) {
+			renderStatus(data);
+			return data;
+		}, function (statusError) {
 		/*
-		 * The command ACL exists in older package revisions and keeps already
-		 * logged-in LuCI sessions working. The direct file fallback uses /tmp,
-		 * avoiding /var/run symlink ACL mismatches on OpenWrt.
+		 * Keep the direct file fallback for installations that have the file ACL
+		 * but do not expose either command through rpcd yet. The /tmp path avoids
+		 * /var/run symlink ACL mismatches on OpenWrt.
 		 */
 		return fs.read('/tmp/statuspigeon/last-report').then(function (contents) {
 			var data = parseStatusFile(contents);
@@ -114,8 +124,9 @@ function refreshStatus() {
 				renderStatus(data);
 				return data;
 			}
-			renderStatusError(fileError || error);
+			renderStatusError(fileError || statusError || reportError);
 			return null;
+		});
 		});
 	});
 }
@@ -186,8 +197,8 @@ return view.extend({
 			return '<span id="' + statusElementId + '">' + _('Loading...') + '</span>';
 		};
 
-		var submit = section.option(form.Button, '_submit_now', _('Submit now'));
-		submit.inputtitle = _('Submit now');
+		var submit = section.option(form.Button, '_submit_now', _('Report'));
+		submit.inputtitle = _('Report Now');
 		submit.inputstyle = 'apply';
 		submit.description = _('Save the current settings and send a report immediately.');
 		submit.onclick = function () {

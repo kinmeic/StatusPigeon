@@ -45,18 +45,6 @@
     return parts.join(' ');
   }
 
-  function formatBytes(value) {
-    var number = Math.max(0, Number(value || 0)) / 1024;
-    if (!isFinite(number)) return '—';
-    var units = ['KB/s', 'MB/s', 'GB/s', 'TB/s'];
-    var index = 0;
-    while (number >= 1024 && index < units.length - 1) {
-      number /= 1024;
-      index++;
-    }
-    return (number >= 100 ? number.toFixed(0) : number.toFixed(1)) + ' ' + units[index];
-  }
-
   function formatIPList(value) {
     return Array.isArray(value) && value.length ? value.join('\n') : '—';
   }
@@ -93,11 +81,10 @@
     return isFinite(value) ? value : null;
   }
 
-  function formatAxisValue(value, percentage, rate) {
+  function formatAxisValue(value, percentage) {
     if (percentage) {
       return (Math.abs(value) >= 10 ? value.toFixed(0) : value.toFixed(1)) + '%';
     }
-    if (rate) return formatBytes(value);
     return Math.abs(value) >= 10 ? value.toFixed(1) : value.toFixed(2);
   }
 
@@ -134,9 +121,9 @@
     return markup;
   }
 
-  function formatTooltipValue(value, percentage, rate) {
+  function formatTooltipValue(value, percentage) {
     if (value === null || value === undefined || value === '') return '—';
-    return formatAxisValue(Number(value), percentage, rate);
+    return formatAxisValue(Number(value), percentage);
   }
 
   function hideChartTooltip() {
@@ -152,7 +139,7 @@
       var value = numericValue(point, item.field);
       return '<div class="chart-tooltip-row"><span class="chart-tooltip-dot" style="background:' +
         escapeHtml(item.color || '#fff') + '"></span><span>' + escapeHtml(item.label) +
-        '</span><strong>' + escapeHtml(formatTooltipValue(value, item.percentage, item.rate)) +
+        '</span><strong>' + escapeHtml(formatTooltipValue(value, item.percentage)) +
         '</strong></div>';
     }).join('');
     element.innerHTML = '<div class="chart-tooltip-time">' +
@@ -198,7 +185,7 @@
     });
   }
 
-  function yAxisMarkup(min, max, percentage, rate, width, left, top, plotHeight, right) {
+  function yAxisMarkup(min, max, percentage, width, left, top, plotHeight, right) {
     var tickCount = 4;
     var markup = [];
     for (var index = 0; index <= tickCount; index++) {
@@ -209,7 +196,7 @@
         (width - right) + '" y2="' + y.toFixed(2) + '" class="chart-grid"/>');
       markup.push('<text x="' + (left - 8) + '" y="' + y.toFixed(2) +
         '" text-anchor="end" dominant-baseline="middle" class="chart-axis-label">' +
-        formatAxisValue(value, percentage, rate) + '</text>');
+        formatAxisValue(value, percentage) + '</text>');
     }
     return markup.join('');
   }
@@ -253,7 +240,7 @@
     });
     var area = left + ',' + (height - bottom) + ' ' + coords.join(' ') +
       ' ' + (width - right) + ',' + (height - bottom);
-    var grid = yAxisMarkup(min, max, percentage, false, width, left, top, plotHeight, right);
+    var grid = yAxisMarkup(min, max, percentage, width, left, top, plotHeight, right);
     var times = xAxisMarkup(samples.map(function (sample) { return sample.point; }),
       left, plotWidth, height, bottom);
     element.innerHTML = '<svg class="chart-svg" viewBox="0 0 ' + width + ' ' + height +
@@ -266,53 +253,8 @@
       chartHoverMarkup(samples.map(function (sample) { return sample.point; }), left, top,
         plotWidth, plotHeight) + '</svg>';
     bindChartHover(element, samples.map(function (sample) { return sample.point; }), [{
-      field: field, label: label, color: color, percentage: percentage, rate: false
+      field: field, label: label, color: color, percentage: percentage
     }], left, top, plotWidth, plotHeight);
-  }
-
-  function multiChart(elementId, points, series) {
-    var element = document.getElementById(elementId);
-    var allValues = [];
-    series.forEach(function (item) {
-      points.forEach(function (point) {
-        var value = numericValue(point, item.field);
-        if (value !== null) allValues.push(value);
-      });
-    });
-    if (!allValues.length) {
-      element.innerHTML = '<p class="empty chart-empty">暂无数据</p>';
-      return;
-    }
-    var width = 800, height = 240, left = 64, right = 14, top = 16, bottom = 40;
-    var min = 0, max = Math.max.apply(Math, allValues);
-    if (max <= min) max = 1;
-    var plotWidth = width - left - right, plotHeight = height - top - bottom;
-    var lines = series.map(function (item) {
-      var coords = [];
-      points.forEach(function (point, index) {
-        var value = numericValue(point, item.field);
-        if (value !== null) {
-          var x = chartPointX(index, points.length, left, plotWidth);
-          var y = top + (max - value) * plotHeight / (max - min);
-          coords.push(x.toFixed(2) + ',' + y.toFixed(2));
-        }
-      });
-      return coords.length ? '<polyline points="' + coords.join(' ') + '" fill="none" stroke="' +
-        item.color + '" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>' : '';
-    }).join('');
-    var legend = series.map(function (item) {
-      return '<span class="chart-legend-item"><i style="background:' + item.color + '"></i>' +
-        escapeHtml(item.label) + '</span>';
-    }).join('');
-    var grid = yAxisMarkup(min, max, false, true, width, left, top, plotHeight, right);
-    var times = xAxisMarkup(points, left, plotWidth, height, bottom);
-    element.innerHTML = '<div class="chart-legend">' + legend + '</div><svg class="chart-svg" viewBox="0 0 ' +
-      width + ' ' + height + '" role="img" aria-label="趋势图">' + grid + '<line x1="' + left +
-      '" y1="' + top + '" x2="' + left + '" y2="' + (height - bottom) + '" class="axis"/><line x1="' +
-      left + '" y1="' + (height - bottom) + '" x2="' + (width - right) + '" y2="' + (height - bottom) +
-      '" class="axis"/>' + lines + times + chartHoverMarkup(points, left, top, plotWidth,
-        plotHeight) + '</svg>';
-    bindChartHover(element, points, series, left, top, plotWidth, plotHeight);
   }
 
   function loadCharts(range) {
@@ -323,14 +265,6 @@
         chart('chart-cpu', points, 'cpu', '#3498db', true, 'CPU 使用率');
         chart('chart-mem', points, 'mem', '#9b59b6', true, '内存使用率');
         chart('chart-load', points, 'load1', '#e67e22', false, '系统负载');
-        multiChart('chart-disk', points, [
-          {field: 'disk_read_bps', label: '读取', color: '#2ecc71', rate: true},
-          {field: 'disk_write_bps', label: '写入', color: '#e67e22', rate: true}
-        ]);
-        multiChart('chart-network', points, [
-          {field: 'network_rx_bps', label: '接收', color: '#3498db', rate: true},
-          {field: 'network_tx_bps', label: '发送', color: '#9b59b6', rate: true}
-        ]);
       });
   }
 

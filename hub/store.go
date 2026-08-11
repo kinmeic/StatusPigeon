@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	pkgmetrics "github.com/statuspigeon/metrics"
@@ -41,6 +42,9 @@ func NewStore(path string) (*Store, error) {
 	if err := s.createSchema(); err != nil {
 		return nil, err
 	}
+	if err := s.migrateHostIdentity(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -51,55 +55,145 @@ func (s *Store) createSchema() error {
 	if _, err := s.db.Exec(schemaSQL); err != nil {
 		return err
 	}
-	// Migrate databases created before disk/network rates were added. The
-	// column names are compile-time constants, not user input.
-	for _, column := range []string{
-		"disk_read_bps",
-		"disk_write_bps",
-		"network_rx_bps",
-		"network_tx_bps",
-	} {
-		if err := ensureMetricsColumn(s.db, column); err != nil {
-			return err
-		}
-	}
+	// Existing databases may contain legacy I/O columns.  They are left in
+	// place for non-destructive upgrades, but no new report reads or writes
+	// those columns.
 	return nil
 }
 
-func ensureMetricsColumn(db *sql.DB, column string) error {
-	rows, err := db.Query(`PRAGMA table_info(metrics_raw)`)
+// migrateHostIdentity upgrades the original hostname-keyed hosts table.  A
+// table rebuild is required because the original schema made hostname UNIQUE;
+// keeping that constraint would still merge two devices that use the same
+// display name.  Existing rows receive a deterministic legacy identity so an
+// older agent without device_id can continue updating its old row.
+func (s *Store) migrateHostIdentity() error {
+	columns, err := s.hostColumns()
 	if err != nil {
 		return err
 	}
-	found := false
+	hasDeviceID := columns["device_id"]
+	if hasDeviceID && !s.hostsHaveUniqueHostname() {
+		return nil
+	}
+
+	if _, err := s.db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	defer s.db.Exec(`PRAGMA foreign_keys=ON`)
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`
+CREATE TABLE hosts_new (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id     TEXT NOT NULL,
+    hostname      TEXT NOT NULL,
+    agent_version TEXT,
+    os            TEXT,
+    kernel        TEXT,
+    arch          TEXT,
+    last_seen     INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    last_status   TEXT,
+    last_summary  TEXT,
+    source        TEXT NOT NULL DEFAULT 'push'
+)`); err != nil {
+		return err
+	}
+	deviceExpression := `('legacy-hostname:' || hostname)`
+	if hasDeviceID {
+		deviceExpression = `CASE WHEN device_id IS NULL OR device_id = ''
+            THEN ('legacy-hostname:' || hostname) ELSE device_id END`
+	}
+	query := `INSERT INTO hosts_new
+        (id, device_id, hostname, agent_version, os, kernel, arch, last_seen,
+         created_at, last_status, last_summary, source)
+        SELECT id, ` + deviceExpression + `, hostname, agent_version, os,
+               kernel, arch, last_seen, created_at, last_status, last_summary,
+               source FROM hosts`
+	if _, err := tx.Exec(query); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP TABLE hosts`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`ALTER TABLE hosts_new RENAME TO hosts`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE UNIQUE INDEX idx_hosts_device_id ON hosts(device_id)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_hosts_hostname ON hosts(hostname)`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) hostColumns() (map[string]bool, error) {
+	rows, err := s.db.Query(`PRAGMA table_info(hosts)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := make(map[string]bool)
 	for rows.Next() {
 		var cid, notNull, primaryKey int
 		var name, columnType string
 		var defaultValue interface{}
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			rows.Close()
-			return err
+			return nil, err
 		}
-		if name == column {
-			found = true
+		columns[name] = true
+	}
+	return columns, rows.Err()
+}
+
+func (s *Store) hostsHaveUniqueHostname() bool {
+	rows, err := s.db.Query(`PRAGMA index_list(hosts)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq int
+		var name string
+		var unique int
+		var origin, partial string
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil || unique == 0 {
+			continue
+		}
+		indexRows, err := s.db.Query(`PRAGMA index_info(` + quoteSQLiteIdentifier(name) + `)`)
+		if err != nil {
+			continue
+		}
+		var columns []string
+		for indexRows.Next() {
+			var seqno, cid int
+			var column string
+			if indexRows.Scan(&seqno, &cid, &column) == nil {
+				columns = append(columns, column)
+			}
+		}
+		indexRows.Close()
+		if len(columns) == 1 && columns[0] == "hostname" {
+			return true
 		}
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	if found {
-		return nil
-	}
-	_, err = db.Exec("ALTER TABLE metrics_raw ADD COLUMN " + column + " REAL")
-	return err
+	return false
+}
+
+func quoteSQLiteIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS hosts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    hostname      TEXT UNIQUE NOT NULL,
+    device_id     TEXT UNIQUE NOT NULL,
+    hostname      TEXT NOT NULL,
     agent_version TEXT,
     os            TEXT,
     kernel        TEXT,
@@ -118,10 +212,6 @@ CREATE TABLE IF NOT EXISTS metrics_raw (
     cpu_usage       REAL,
     mem_usage       REAL,
     load1           REAL,
-    disk_read_bps  REAL,
-    disk_write_bps REAL,
-    network_rx_bps REAL,
-    network_tx_bps REAL,
     payload         TEXT NOT NULL,
     FOREIGN KEY(host_id) REFERENCES hosts(id)
 );
@@ -144,6 +234,7 @@ CREATE INDEX IF NOT EXISTS idx_daily_host_date ON uptime_daily(host_id, date);
 // HostRow 主机列表行。
 type HostRow struct {
 	ID          int64  `json:"id"`
+	DeviceID    string `json:"device_id"`
 	Hostname    string `json:"hostname"`
 	OS          string `json:"os"`
 	Kernel      string `json:"kernel"`
@@ -187,33 +278,67 @@ func (s *Store) Ingest(r *pkgmetrics.Report, source, status string) error {
 	return tx.Commit()
 }
 
-// upsertHost 创建或更新主机记录，返回 host_id。
-// last_seen 使用服务端接收时间，避免 agent 时钟偏差干扰失联判定。
-//
-// 注意：必须用 RETURNING 取 id，而非 res.LastInsertId() ——
-// UPSERT 冲突更新后该值依驱动/版本语义不定（可能残留同连接上
-// 其他表上一次 INSERT 的 rowid），曾导致 host_id 错乱、metrics 外键失败。
+// upsertHost 创建或更新主机记录，返回 host_id。DeviceID 是唯一身份键，
+// Hostname 只是可修改的显示名称。没有 device_id 的旧客户端使用
+// legacy-hostname:<hostname>，便于平滑兼容旧数据。
 func upsertHost(run sqlRunner, r *pkgmetrics.Report, source string) (int64, error) {
 	osName, kernel, arch := r.Metrics.Os.Os, r.Metrics.Os.Kernel, r.Metrics.Os.Arch
 	summary := hostSummary(r.Metrics)
 	now := time.Now().Unix()
+	deviceID := reportDeviceID(r)
 
 	var id int64
-	err := run.QueryRow(
-		`INSERT INTO hosts (hostname, agent_version, os, kernel, arch, last_seen, created_at, last_status, last_summary, source)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(hostname) DO UPDATE SET
-		    agent_version=excluded.agent_version,
-		    os=excluded.os, kernel=excluded.kernel, arch=excluded.arch,
-		    last_seen=excluded.last_seen, last_status=excluded.last_status,
-		    last_summary=excluded.last_summary, source=excluded.source
-		 RETURNING id`,
-		r.Hostname, r.AgentVersion, osName, kernel, arch, now, now, statusOperational, summary, source,
-	).Scan(&id)
+	err := run.QueryRow(`SELECT id FROM hosts WHERE device_id=?`, deviceID).Scan(&id)
+	if err == sql.ErrNoRows {
+		// Adopt a legacy row when the first device-aware report arrives after
+		// an upgrade. This preserves its historical metrics and status bar.
+		err = run.QueryRow(
+			`SELECT id FROM hosts WHERE device_id=? AND hostname=?`,
+			"legacy-hostname:"+r.Hostname, r.Hostname,
+		).Scan(&id)
+		if err == nil {
+			if _, err = run.Exec(`UPDATE hosts SET device_id=? WHERE id=?`, deviceID, id); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if err == sql.ErrNoRows {
+		result, insertErr := run.Exec(
+			`INSERT INTO hosts
+			 (device_id, hostname, agent_version, os, kernel, arch, last_seen,
+			  created_at, last_status, last_summary, source)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			deviceID, r.Hostname, r.AgentVersion, osName, kernel, arch, now, now,
+			statusOperational, summary, source,
+		)
+		if insertErr != nil {
+			return 0, insertErr
+		}
+		id, insertErr = result.LastInsertId()
+		if insertErr != nil {
+			return 0, insertErr
+		}
+	}
+	_, err = run.Exec(
+		`UPDATE hosts SET hostname=?, agent_version=?, os=?, kernel=?, arch=?,
+		 last_seen=?, last_status=?, last_summary=?, source=? WHERE id=?`,
+		r.Hostname, r.AgentVersion, osName, kernel, arch, now, statusOperational,
+		summary, source, id,
+	)
 	if err != nil {
 		return 0, err
 	}
 	return id, nil
+}
+
+func reportDeviceID(r *pkgmetrics.Report) string {
+	if value := strings.TrimSpace(r.DeviceID); value != "" {
+		return value
+	}
+	return "legacy-hostname:" + strings.TrimSpace(r.Hostname)
 }
 
 // setHostLive 主机存活时按判定状态刷新 last_status/last_summary/last_seen。
@@ -232,12 +357,10 @@ func insertMetrics(run sqlRunner, hostID int64, r *pkgmetrics.Report) error {
 	payload, _ := jsonMarshal(r)
 	_, err := run.Exec(
 		`INSERT INTO metrics_raw
-		 (host_id, ts, cpu_usage, mem_usage, load1, disk_read_bps, disk_write_bps,
-		  network_rx_bps, network_tx_bps, payload)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 (host_id, ts, cpu_usage, mem_usage, load1, payload)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
 		hostID, r.Timestamp, cpu, mem, load1,
-		r.Metrics.Disk.ReadBps, r.Metrics.Disk.WriteBps,
-		r.Metrics.Network.RxBps, r.Metrics.Network.TxBps, payload,
+		payload,
 	)
 	return err
 }
@@ -345,7 +468,7 @@ func (s *Store) MarkOffline(thresholdTs int64) (int, error) {
 // ListHosts 返回全部主机。
 func (s *Store) ListHosts() ([]HostRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, hostname, COALESCE(os,''), COALESCE(kernel,''), COALESCE(arch,''),
+		`SELECT id, COALESCE(device_id,''), hostname, COALESCE(os,''), COALESCE(kernel,''), COALESCE(arch,''),
 		        COALESCE(agent_version,''), last_seen, COALESCE(last_status,''),
 		        COALESCE(last_summary,'{}'), source
 		 FROM hosts ORDER BY hostname`,
@@ -358,7 +481,7 @@ func (s *Store) ListHosts() ([]HostRow, error) {
 	var out []HostRow
 	for rows.Next() {
 		var h HostRow
-		if err := rows.Scan(&h.ID, &h.Hostname, &h.OS, &h.Kernel, &h.Arch,
+		if err := rows.Scan(&h.ID, &h.DeviceID, &h.Hostname, &h.OS, &h.Kernel, &h.Arch,
 			&h.AgentVer, &h.LastSeen, &h.LastStatus, &h.LastSummary, &h.Source); err != nil {
 			return nil, err
 		}
@@ -419,10 +542,8 @@ const maxSeriesPoints = 10000
 // 超过 maxSeriesPoints 时取最新的 N 条。
 func (s *Store) MetricsSeries(hostID int64, fromTs int64) ([]MetricPoint, error) {
 	rows, err := s.db.Query(
-		`SELECT ts, cpu_usage, mem_usage, load1, disk_read_bps, disk_write_bps,
-		        network_rx_bps, network_tx_bps FROM (
-		    SELECT ts, cpu_usage, mem_usage, load1, disk_read_bps, disk_write_bps,
-		           network_rx_bps, network_tx_bps FROM metrics_raw
+		`SELECT ts, cpu_usage, mem_usage, load1 FROM (
+		    SELECT ts, cpu_usage, mem_usage, load1 FROM metrics_raw
 		    WHERE host_id=? AND ts >= ? ORDER BY ts DESC LIMIT ?
 		) ORDER BY ts`,
 		hostID, fromTs, maxSeriesPoints,
@@ -435,8 +556,7 @@ func (s *Store) MetricsSeries(hostID int64, fromTs int64) ([]MetricPoint, error)
 	var out []MetricPoint
 	for rows.Next() {
 		var p MetricPoint
-		if err := rows.Scan(&p.Ts, &p.CPU, &p.Mem, &p.Load,
-			&p.DiskRead, &p.DiskWrite, &p.NetworkRx, &p.NetworkTx); err != nil {
+		if err := rows.Scan(&p.Ts, &p.CPU, &p.Mem, &p.Load); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -446,14 +566,10 @@ func (s *Store) MetricsSeries(hostID int64, fromTs int64) ([]MetricPoint, error)
 
 // MetricPoint 单个指标样本。
 type MetricPoint struct {
-	Ts        int64    `json:"ts"`
-	CPU       *float64 `json:"cpu"`
-	Mem       *float64 `json:"mem"`
-	Load      *float64 `json:"load1"`
-	DiskRead  *float64 `json:"disk_read_bps"`
-	DiskWrite *float64 `json:"disk_write_bps"`
-	NetworkRx *float64 `json:"network_rx_bps"`
-	NetworkTx *float64 `json:"network_tx_bps"`
+	Ts   int64    `json:"ts"`
+	CPU  *float64 `json:"cpu"`
+	Mem  *float64 `json:"mem"`
+	Load *float64 `json:"load1"`
 }
 
 // Cleanup 删除早于 cutoffTs 的原始与聚合数据，返回两类各自的删除条数。

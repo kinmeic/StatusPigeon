@@ -284,13 +284,28 @@ if ($loggedIn && $section === 'logs') {
 
             <section class="admin-card">
               <h2>API Key 管理</h2>
-              <p>当前 key：<?php echo $currentKey === '' ? '<em>未配置</em>' : '<code>' . statuspigeon_admin_escape(substr($currentKey, 0, 6)) . '••••••••</code>'; ?></p>
+              <?php if ($currentKey === ''): ?>
+                <p>当前 key：<em>未配置</em></p>
+              <?php else: ?>
+                <p>当前完整 API key：</p>
+                <div class="api-key-copy-row">
+                  <code id="current-api-key" class="api-key-value"><?php echo statuspigeon_admin_escape($currentKey); ?></code>
+                </div>
+              <?php endif; ?>
               <p class="host-meta">完整接收地址：<code class="break-code"><?php echo statuspigeon_admin_escape($reportUrl); ?></code></p>
-              <form method="post" action="admin.php?section=api" onsubmit="return confirm('生成新 API key 后，旧 key 会立即失效。确定继续吗？');">
-                <input type="hidden" name="action" value="generate_api_key">
-                <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
-                <button type="submit" class="danger-button">生成新 API key</button>
-              </form>
+              <div class="api-actions">
+                <form method="post" action="admin.php?section=api" onsubmit="return confirm('生成新 API key 后，旧 key 会立即失效。确定继续吗？');">
+                  <input type="hidden" name="action" value="generate_api_key">
+                  <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
+                  <button type="submit" class="danger-button">生成新 API key</button>
+                </form>
+                <?php if ($currentKey !== ''): ?>
+                  <button type="button" id="copy-current-api-key" class="copy-button">复制当前 API key</button>
+                <?php endif; ?>
+              </div>
+              <?php if ($currentKey !== ''): ?>
+                <p id="copy-current-api-key-status" class="copy-status" aria-live="polite"></p>
+              <?php endif; ?>
             </section>
           <?php elseif ($section === 'logs'): ?>
             <section class="admin-card">
@@ -314,7 +329,7 @@ if ($loggedIn && $section === 'logs') {
                             : ($logStatus === 'operational' ? '运行正常' : ($logStatus ?: '未知'));
                         ?>
                         <tr>
-                          <td><?php echo statuspigeon_admin_escape(date('Y-m-d H:i:s', (int) $log['ts'])); ?></td>
+                          <td class="log-time" data-timestamp="<?php echo (int) $log['ts']; ?>"><?php echo statuspigeon_admin_escape(date('Y-m-d H:i:s', (int) $log['ts'])); ?></td>
                           <td><?php echo statuspigeon_admin_escape($log['hostname']); ?></td>
                           <td><?php echo statuspigeon_admin_escape(number_format((float) $log['cpu_usage'], 1)); ?>%</td>
                           <td><?php echo statuspigeon_admin_escape(number_format((float) $log['mem_usage'], 1)); ?>%</td>
@@ -345,30 +360,20 @@ if ($loggedIn && $section === 'logs') {
       </div>
     <?php endif; ?>
   </div>
-  <?php if ($generatedKey !== ''): ?>
+  <?php if ($loggedIn): ?>
   <script>
     (function () {
-      var button = document.getElementById('copy-api-key');
-      var value = document.getElementById('generated-api-key');
-      var status = document.getElementById('copy-api-key-status');
-      if (!button || !value || !status) return;
-
-      function copied() {
-        status.textContent = '已复制完整 API key';
-        button.textContent = '已复制';
-        window.setTimeout(function () { button.textContent = '复制'; }, 1800);
-      }
-
-      function failed() {
-        status.textContent = '复制失败，请手动选择并复制';
-      }
-
-      button.addEventListener('click', function () {
-        var text = value.textContent || '';
+      function fallbackCopy(text, copied, failed) {
         if (navigator.clipboard && window.isSecureContext) {
-          navigator.clipboard.writeText(text).then(copied, failed);
+          navigator.clipboard.writeText(text).then(copied, function () {
+            fallbackCopyWithTextarea(text, copied, failed);
+          });
           return;
         }
+        fallbackCopyWithTextarea(text, copied, failed);
+      }
+
+      function fallbackCopyWithTextarea(text, copied, failed) {
         var input = document.createElement('textarea');
         input.value = text;
         input.setAttribute('readonly', '');
@@ -383,6 +388,44 @@ if ($loggedIn && $section === 'logs') {
           failed();
         }
         document.body.removeChild(input);
+      }
+
+      function bindCopy(buttonId, valueId, statusId) {
+        var button = document.getElementById(buttonId);
+        var value = document.getElementById(valueId);
+        var status = document.getElementById(statusId);
+        if (!button || !value || !status) return;
+
+        button.addEventListener('click', function () {
+          var text = value.textContent || '';
+          function copied() {
+            status.textContent = '已复制完整 API key';
+            button.textContent = '已复制';
+            window.setTimeout(function () { button.textContent = '复制'; }, 1800);
+          }
+          function failed() {
+            status.textContent = '复制失败，请手动选择并复制';
+          }
+          fallbackCopy(text, copied, failed);
+        });
+      }
+
+      bindCopy('copy-current-api-key', 'current-api-key', 'copy-current-api-key-status');
+      bindCopy('copy-api-key', 'generated-api-key', 'copy-api-key-status');
+
+      Array.prototype.forEach.call(document.querySelectorAll('.log-time[data-timestamp]'), function (cell) {
+        var timestamp = Number(cell.getAttribute('data-timestamp') || 0);
+        if (!timestamp) return;
+        var date = new Date(timestamp * 1000);
+        if (isNaN(date.getTime())) return;
+        try {
+          cell.textContent = new Intl.DateTimeFormat('zh-CN', {
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+          }).format(date).replace(/\//g, '-');
+        } catch (error) {
+          cell.textContent = date.toLocaleString();
+        }
       });
     }());
   </script>

@@ -33,7 +33,7 @@ POST /report/index.php
 
 PHP 没有后台进程，因此每次请求会顺带执行失联标记和保留期清理。默认规则与 Go Hub 相同：CPU 超过 90% 或内存超过 95% 标记 `degraded`，超过 3 个 5 分钟周期没有上报标记 `down`。
 
-主机详情页 `host.php?id=...` 与趋势接口需要先在 `admin.php` 登录；状态总览和状态 API 保持公开。详情页使用左宽右窄布局，左侧展示 CPU、内存、负载、磁盘 I/O 与网络速度，右侧展示系统信息、IP 地址和 Hub 最近一次接收 report 的时间。
+主机详情页 `host.php?id=...` 与趋势接口需要先在 `admin.php` 登录；状态总览和状态 API 保持公开。详情页使用左宽右窄布局，左侧展示 CPU、内存与负载，右侧展示系统信息、IP 地址和 Hub 最近一次接收 report 的时间。Hub 按 `device_id` 识别设备，Hostname 仅作显示名；磁盘 I/O 与网络瞬时速度不纳入采集、推送或存储。
 
 ## Agent 配置
 

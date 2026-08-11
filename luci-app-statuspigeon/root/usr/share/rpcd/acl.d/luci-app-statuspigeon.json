@@ -13,7 +13,8 @@
     "write": {
       "uci": [ "statuspigeon" ],
       "file": {
-        "/usr/bin/statuspigeon-report": [ "exec" ]
+        "/usr/bin/statuspigeon-report": [ "exec" ],
+        "/usr/bin/statuspigeon-status": [ "exec" ]
       }
     }
   }

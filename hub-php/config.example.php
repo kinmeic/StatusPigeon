@@ -22,7 +22,8 @@ return array(
     // Prefer a path outside the public document root.
     'db_path' => dirname(__DIR__) . '/statuspigeon-data/statuspigeon.sqlite',
 
-    'timezone' => 'UTC',
+    // Report timestamps are displayed in this timezone.
+    'timezone' => 'Asia/Shanghai',
     'retention_days' => 90,
     'uptime_bar_days' => 60,
     'degraded_cpu' => 90.0,

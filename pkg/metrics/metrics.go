@@ -33,34 +33,19 @@ type MemInfo struct {
 	SwapUsed  uint64  `json:"swap_used"`
 }
 
-// DiskIOInfo contains cumulative disk counters and their sampling rate.
-type DiskIOInfo struct {
-	ReadBytes  uint64  `json:"read_bytes"`
-	WriteBytes uint64  `json:"write_bytes"`
-	ReadBps    float64 `json:"read_bps"`
-	WriteBps   float64 `json:"write_bps"`
-}
-
-// NetworkIOInfo contains cumulative network counters and their sampling rate.
-type NetworkIOInfo struct {
-	RxBytes uint64  `json:"rx_bytes"`
-	TxBytes uint64  `json:"tx_bytes"`
-	RxBps   float64 `json:"rx_bps"`
-	TxBps   float64 `json:"tx_bps"`
-}
-
-// Metrics is the complete metric set for one report.
+// Metrics is the complete metric set for one report.  Disk and network
+// throughput are intentionally excluded: a single instantaneous sample is
+// not meaningful as a long-term trend metric.
 type Metrics struct {
-	Os      OsInfo        `json:"os"`
-	Cpu     CPUInfo       `json:"cpu"`
-	Mem     MemInfo       `json:"mem"`
-	Disk    DiskIOInfo    `json:"disk"`
-	Network NetworkIOInfo `json:"network"`
+	Os  OsInfo  `json:"os"`
+	Cpu CPUInfo `json:"cpu"`
+	Mem MemInfo `json:"mem"`
 }
 
 // Report is the complete JSON structure for one push or pull report.
 type Report struct {
 	AgentVersion string  `json:"agent_version"`
+	DeviceID     string  `json:"device_id"` // Stable device identity; not the display name.
 	Hostname     string  `json:"hostname"`
 	Timestamp    int64   `json:"timestamp"` // Unix 秒
 	Metrics      Metrics `json:"metrics"`
