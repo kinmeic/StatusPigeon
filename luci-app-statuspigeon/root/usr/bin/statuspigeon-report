@@ -1,7 +1,7 @@
 #!/bin/sh
 # One-shot OpenWrt reporter. It emits the same JSON shape as pkg/metrics and
 # posts it to the PHP or Go hub. Required runtime tools are BusyBox, curl and
-# libubox jshn; no jq or resident listener is needed.
+# libubox jshn/jsonfilter; no jq or resident listener is needed.
 
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 umask 077
@@ -129,7 +129,7 @@ trap 'rm -rf /tmp/statuspigeon-report.lock' EXIT HUP INT TERM
 
 hostname="${hostname:-$(cat /proc/sys/kernel/hostname 2>/dev/null || uname -n)}"
 agent_version="$(get_uci statuspigeon.main.agent_version)"
-agent_version="${agent_version:-luci-app-statuspigeon/1.0.4}"
+agent_version="${agent_version:-luci-app-statuspigeon/1.0.5}"
 uptime="$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)"
 kernel="$(uname -r 2>/dev/null || echo unknown)"
 arch="$(uname -m 2>/dev/null || echo unknown)"
@@ -236,11 +236,31 @@ json_add_ip_array() {
 	json_close_array
 }
 
-# BusyBox's ip applet on some OpenWrt images does not support the iproute2
-# global -4/-6 flags.  Read one portable `ip addr` listing and filter its
-# address-family tokens instead; retain an ifconfig fallback for tiny images
-# that do not ship the ip applet at all.
+# OpenWrt's network status service is the most reliable source of interface
+# addresses.  It also works on images where BusyBox's `ip` applet has a
+# reduced output format.  Keep the `ip` and `ifconfig` paths as fallbacks for
+# small/custom images without ubus or jsonfilter.
+collect_ubus_ip_addresses() {
+	command -v ubus >/dev/null 2>&1 || return 0
+	command -v jsonfilter >/dev/null 2>&1 || return 0
+
+	network_json="$(ubus call network.interface dump 2>/dev/null)"
+	[ -n "$network_json" ] || return 0
+
+	ipv4_values="$(printf '%s\n' "$network_json" | jsonfilter -e "@.interface[*]['ipv4-address'][*].address" 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
+	ipv6_values="$(printf '%s\n' "$network_json" | jsonfilter -e "@.interface[*]['ipv6-address'][*].address" 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
+
+	[ -n "$ipv4_values" ] && printf '%s\n' "$ipv4_values" | awk '{ print "inet", $0 }'
+	[ -n "$ipv6_values" ] && printf '%s\n' "$ipv6_values" | awk '{ print "inet6", $0 }'
+}
+
 collect_ip_addresses() {
+	ubus_output="$(collect_ubus_ip_addresses)"
+	if [ -n "$ubus_output" ]; then
+		printf '%s\n' "$ubus_output"
+		return
+	fi
+
 	if command -v ip >/dev/null 2>&1; then
 		ip_output="$(ip addr show 2>/dev/null)"
 		[ -n "$ip_output" ] || ip_output="$(ip address show 2>/dev/null)"

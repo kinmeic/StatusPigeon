@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-statuspigeon
-PKG_VERSION:=1.0.4
+PKG_VERSION:=1.0.5
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=Status Pigeon contributors
@@ -14,7 +14,7 @@ define Package/luci-app-statuspigeon
   SUBMENU:=3. Applications
   TITLE:=Status Pigeon JSON reporting agent
   PKGARCH:=all
-  DEPENDS:=+luci-base +rpcd-mod-file +curl +ca-bundle +jshn
+  DEPENDS:=+luci-base +rpcd-mod-file +curl +ca-bundle +jshn +jsonfilter
 endef
 
 define Package/luci-app-statuspigeon/description

@@ -33,7 +33,7 @@ opkg install luci-app-statuspigeon_*.ipk  # OpenWrt 24.10 and older
 
 The recommended endpoint is `https://example.com/report/`. The app also accepts `https://example.com/report/index.php`, `/report`, or the Hub base URL. The reporter normalizes the latter two to `/report/`; the explicit `index.php` path remains supported for hosts without a directory index.
 
-The package needs `curl`, `ca-bundle` for HTTPS verification, and libubox `jshn` (provided by the declared dependencies). The LuCI page shows the last attempt, last successful submission, reason, and HTTP status. It also provides a `Report Now` button.
+The package needs `curl`, `ca-bundle` for HTTPS verification, libubox `jshn`, and OpenWrt's `jsonfilter` (provided by the declared dependencies). Interface addresses are read from `ubus` network status first, with `ip`/`ifconfig` fallbacks. The LuCI page shows the last attempt, last successful submission, reason, and HTTP status. It also provides a `Report Now` button.
 
 A one-shot report can also be triggered with:
 
