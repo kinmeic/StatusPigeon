@@ -18,7 +18,7 @@ POST /report/
 POST /report/index.php
 ```
 
-请求头支持 `Authorization: Bearer <api_key>` 和 `X-API-Key: <api_key>`。请求体就是 Go agent 使用的 JSON `Report`，时间戳允许服务器时间前后 5 分钟。每次接收时，Hub 还会记录 PHP 服务器观察到的 `REMOTE_ADDR`，作为主机的服务端检测地址；它会与 agent 上报的 IPv4/IPv6 合并、按 IP 去重，并在详情页按 `IP@接口` 格式显示。Hub 自身无法知道该来源地址对应的客户端网络接口，因此这类地址使用 `@hub` 标记。
+请求头支持 `Authorization: Bearer <api_key>` 和 `X-API-Key: <api_key>`。请求体就是 Go agent 使用的 JSON `Report`，时间戳允许服务器时间前后 5 分钟。每次接收时，Hub 会尝试记录公网服务端观察地址，并与 agent 上报的 IPv4/IPv6 合并、按 IP 去重，在详情页按 `IP@接口` 格式显示。若 PHP 位于内网反向代理之后，Hub 只在直接连接地址为内网时读取常见的 `X-Forwarded-For`、`X-Real-IP` 或 `CF-Connecting-IP`；没有可确认的公网地址时不会显示错误的 `@hub` 内网地址。
 
 ## 直接文件 API
 

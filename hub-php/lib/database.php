@@ -193,6 +193,27 @@ function statuspigeon_metric_int($value, $default)
     return (int) $default;
 }
 
+/**
+ * Return a globally routable IP address, optionally restricted to one family.
+ * Private/reserved addresses are not useful as a public Hub observation and
+ * are commonly produced by an internal reverse proxy or application gateway.
+ */
+function statuspigeon_public_ip($value, $family = 0)
+{
+    $value = trim((string) $value);
+    if ($value === '') {
+        return '';
+    }
+    $flags = FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE;
+    if ((int) $family === 4) {
+        $flags |= FILTER_FLAG_IPV4;
+    } elseif ((int) $family === 6) {
+        $flags |= FILTER_FLAG_IPV6;
+    }
+    $validated = filter_var($value, FILTER_VALIDATE_IP, $flags);
+    return $validated === false ? '' : (string) $validated;
+}
+
 function statuspigeon_string($value, $default)
 {
     return is_scalar($value) ? trim((string) $value) : (string) $default;
@@ -245,13 +266,12 @@ function statuspigeon_host_ip_list($values, $remoteIp, $family)
         $out[] = $value;
     }
 
-    $remoteIp = trim((string) $remoteIp);
-    $flag = $family === 6 ? FILTER_FLAG_IPV6 : FILTER_FLAG_IPV4;
-    if ($remoteIp !== '' && filter_var($remoteIp, FILTER_VALIDATE_IP, $flag) !== false) {
+    $remoteIp = statuspigeon_public_ip($remoteIp, $family);
+    if ($remoteIp !== '') {
         $key = strtolower($remoteIp);
         if (!isset($seen[$key])) {
-            // The actual network interface is unknown to the Hub.  @hub
-            // distinguishes this observed address from an agent interface.
+            // The actual network interface is unknown to the Hub. @hub marks
+            // a public address observed through the Hub/proxy chain.
             array_unshift($out, $remoteIp . '@hub');
         }
     }
@@ -369,8 +389,8 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
     $date = date('Y-m-d', $report['timestamp']);
     $payload = statuspigeon_json_encode($report);
     $deviceId = statuspigeon_report_device_id($report);
-    $remoteIp = trim((string) $remoteIp);
-    if ($remoteIp === '' || filter_var($remoteIp, FILTER_VALIDATE_IP) === false) {
+    $remoteIp = statuspigeon_public_ip($remoteIp);
+    if ($remoteIp === '') {
         $remoteIp = null;
     }
 
@@ -426,7 +446,7 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
 
         $updateHost = $pdo->prepare(
             'UPDATE hosts SET agent_version=:agent_version, os=:os, kernel=:kernel,
-             arch=:arch, remote_ip=COALESCE(:remote_ip, remote_ip), last_seen=:last_seen, last_status=:last_status,
+             arch=:arch, remote_ip=:remote_ip, last_seen=:last_seen, last_status=:last_status,
              last_summary=:last_summary, source=:source WHERE id=:id'
         );
         $updateHost->execute(array(

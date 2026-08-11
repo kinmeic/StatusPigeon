@@ -141,13 +141,51 @@ function statuspigeon_request_body($config)
     return $body;
 }
 
-/** Return the IP address observed by the PHP server for the current request. */
+/**
+ * Return a public client IP observed by the PHP server or its trusted proxy.
+ * A private REMOTE_ADDR is normally the reverse proxy/application gateway;
+ * in that case inspect common proxy headers, but never let those headers
+ * override a directly connected public peer.
+ */
 function statuspigeon_request_remote_ip()
 {
-    $value = isset($_SERVER['REMOTE_ADDR']) ? trim((string) $_SERVER['REMOTE_ADDR']) : '';
-    if ($value !== '' && filter_var($value, FILTER_VALIDATE_IP) !== false) {
-        return $value;
+    $direct = isset($_SERVER['REMOTE_ADDR']) ? trim((string) $_SERVER['REMOTE_ADDR']) : '';
+    $directPublic = statuspigeon_public_ip($direct);
+    if ($directPublic !== '') {
+        return $directPublic;
     }
+
+    // Only consult forwarding headers when the immediate peer is not public.
+    // This avoids trusting spoofed X-Forwarded-For headers on direct traffic.
+    $headers = array('HTTP_CF_CONNECTING_IP', 'HTTP_TRUE_CLIENT_IP', 'HTTP_X_REAL_IP');
+    foreach ($headers as $header) {
+        if (!isset($_SERVER[$header])) {
+            continue;
+        }
+        $candidate = statuspigeon_public_ip($_SERVER[$header]);
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+
+    if (isset($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+        $forwarded = explode(',', (string) $_SERVER['HTTP_X_FORWARDED_FOR']);
+        foreach ($forwarded as $candidate) {
+            $candidate = trim($candidate);
+            $candidate = trim($candidate, " \t\r\n\"'");
+            $candidate = preg_replace('/^for=/i', '', $candidate);
+            $candidate = trim($candidate, " \t\r\n\"'");
+            if (strpos($candidate, '[') === 0 && strpos($candidate, ']') !== false) {
+                $candidate = substr($candidate, 1, strpos($candidate, ']') - 1);
+            }
+            $candidate = statuspigeon_public_ip($candidate);
+            if ($candidate !== '') {
+                return $candidate;
+            }
+        }
+    }
+
+    // Do not persist/display a private gateway address as @hub.
     return '';
 }
 
