@@ -7,7 +7,7 @@ PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 umask 077
 reason="${1:-timer}"
 timestamp="$(date +%s)"
-state_dir=/var/run/statuspigeon
+state_dir=/tmp/statuspigeon
 state_file="$state_dir/last-report"
 
 get_uci() {
@@ -85,7 +85,7 @@ esac
 
 # Prevent a network hotplug report and the timer from posting at the same
 # time. A stale lock is safe to remove after its recorded process disappears.
-lock_dir=/var/run/statuspigeon-report.lock
+lock_dir=/tmp/statuspigeon-report.lock
 if [ -d "$lock_dir" ]; then
 	lock_pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
 	if [ -n "$lock_pid" ] && [ -d "/proc/$lock_pid" ]; then
@@ -95,11 +95,11 @@ if [ -d "$lock_dir" ]; then
 fi
 mkdir "$lock_dir" 2>/dev/null || exit 0
 echo "$$" > "$lock_dir/pid"
-trap 'rm -rf /var/run/statuspigeon-report.lock' EXIT HUP INT TERM
+trap 'rm -rf /tmp/statuspigeon-report.lock' EXIT HUP INT TERM
 
 hostname="${hostname:-$(cat /proc/sys/kernel/hostname 2>/dev/null || uname -n)}"
 agent_version="$(get_uci statuspigeon.main.agent_version)"
-agent_version="${agent_version:-luci-app-statuspigeon/1.0}"
+agent_version="${agent_version:-luci-app-statuspigeon/1.0.3}"
 uptime="$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)"
 kernel="$(uname -r 2>/dev/null || echo unknown)"
 arch="$(uname -m 2>/dev/null || echo unknown)"
@@ -107,9 +107,12 @@ arch="$(uname -m 2>/dev/null || echo unknown)"
 os_name="OpenWrt"
 os_version=""
 if [ -r /etc/openwrt_release ]; then
-	os_from_file="$(sed -n 's/^DISTRIB_ID=//p' /etc/openwrt_release 2>/dev/null | head -n1 | tr -d "'")"
+	os_from_file="$(sed -n 's/^DISTRIB_ID=//p' /etc/openwrt_release 2>/dev/null | head -n1 | tr -d "\"'")"
 	[ -n "$os_from_file" ] && os_name="$os_from_file"
-	os_version="$(sed -n 's/^DISTRIB_RELEASE=//p' /etc/openwrt_release 2>/dev/null | head -n1 | tr -d "'")"
+	os_version="$(sed -n 's/^DISTRIB_RELEASE=//p' /etc/openwrt_release 2>/dev/null | head -n1 | tr -d "\"'")"
+fi
+if [ -z "$os_version" ] && [ -r /etc/os-release ]; then
+	os_version="$(sed -n 's/^VERSION_ID=//p' /etc/os-release 2>/dev/null | head -n1 | tr -d "\"'")"
 fi
 
 # Read cumulative counters from procfs. Rates are calculated over the same
@@ -184,8 +187,8 @@ json_add_ip_array() {
 
 # Avoid iproute2-only -o output; the regular `ip addr` format is also
 # available on small BusyBox OpenWrt images.
-ipv4="$(ip -4 addr show 2>/dev/null | awk '$3 == "inet" {sub(/\/.*/, "", $4); if ($4 !~ /^127\./ && $4 !~ /^169\.254\./) print $4}' | tr '\n' ' ')"
-ipv6="$(ip -6 addr show 2>/dev/null | awk '$3 == "inet6" {sub(/\/.*/, "", $4); if ($4 != "::1" && tolower($4) !~ /^fe80:/) print $4}' | tr '\n' ' ')"
+ipv4="$(ip -4 addr show 2>/dev/null | awk '$1 == "inet" {sub(/\/.*/, "", $2); if ($2 !~ /^127\./ && $2 !~ /^169\.254\./) print $2}' | tr '\n' ' ')"
+ipv6="$(ip -6 addr show 2>/dev/null | awk '$1 == "inet6" {sub(/\/.*/, "", $2); if ($2 != "::1" && tolower($2) !~ /^fe80:/) print $2}' | tr '\n' ' ')"
 
 json_init
 json_add_string 'agent_version' "$agent_version"

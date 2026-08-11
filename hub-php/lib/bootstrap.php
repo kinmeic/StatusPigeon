@@ -9,6 +9,7 @@ define('STATUSPIGEON_BOOTSTRAPPED', true);
 $config = array(
     'api_key' => '',
     'admin_password_hash' => '',
+    'public_base_url' => '',
     'db_path' => dirname(__DIR__) . '/../statuspigeon-data/statuspigeon.sqlite',
     'timezone' => 'UTC',
     'retention_days' => 90,

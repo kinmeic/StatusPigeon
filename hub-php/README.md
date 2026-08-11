@@ -9,7 +9,7 @@
 3. 修改 `config.php` 中的 `api_key`。数据库路径建议放在网站根目录之外，并保证 PHP 进程可写。
 4. 直接访问 `/index.php`。本版本不依赖 URL rewrite。
 
-管理页面为 `/admin.php`。首次登录使用当前 `api_key`，进入后可以生成新的 API key，并设置独立的管理密码。新配置写入同目录的 `config.local.php`，因此 PHP-FPM 用户必须对网站目录有写权限；如果虚拟主机禁止 PHP 写文件，请手动维护 `config.php`。
+管理页面为 `/admin.php`。首次登录使用当前 `api_key`，进入后可以管理 API key、查询最近接收日志，并设置独立的管理密码。新配置写入同目录的 `config.local.php`，因此 PHP-FPM 用户必须对网站目录有写权限；如果虚拟主机禁止 PHP 写文件，请手动维护 `config.php`。如需让管理页显示固定的完整接收地址，可在 `config.php` 设置 `public_base_url`，例如 `https://example.com/statuspigeon`。
 
 接收地址为：
 

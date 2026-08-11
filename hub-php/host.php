@@ -48,6 +48,7 @@ statuspigeon_admin_require_page();
       </aside>
     </div>
   </div>
+  <div id="chart-tooltip" class="chart-tooltip" hidden></div>
   <script src="assets/host.js"></script>
 </body>
 </html>

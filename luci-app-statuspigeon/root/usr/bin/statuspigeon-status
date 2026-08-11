@@ -2,7 +2,7 @@
 # Print the last reporter result as JSON for the LuCI status view.
 
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
-state_file=/var/run/statuspigeon/last-report
+state_file=/tmp/statuspigeon/last-report
 
 state_get() {
 	[ -r "$state_file" ] || return 0

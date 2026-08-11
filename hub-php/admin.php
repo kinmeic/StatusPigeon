@@ -132,7 +132,7 @@ if ($loggedIn && $action === 'generate_api_key') {
         $newKey = bin2hex(random_bytes(32));
         statuspigeon_admin_write_local(array('api_key' => $newKey));
         $_SESSION['statuspigeon_generated_key'] = $newKey;
-        statuspigeon_admin_redirect('新的 API key 已保存', false, 'admin.php');
+        statuspigeon_admin_redirect('新的 API key 已保存', false, 'admin.php?section=api');
     } catch (Exception $e) {
         statuspigeon_admin_redirect($e->getMessage(), true, 'admin.php');
     }
@@ -156,7 +156,7 @@ if ($loggedIn && $action === 'set_admin_password') {
     }
     try {
         statuspigeon_admin_write_local(array('admin_password_hash' => $hash));
-        statuspigeon_admin_redirect('管理密码已更新', false, 'admin.php');
+        statuspigeon_admin_redirect('管理密码已更新', false, 'admin.php?section=password');
     } catch (Exception $e) {
         statuspigeon_admin_redirect($e->getMessage(), true, 'admin.php');
     }
@@ -164,6 +164,10 @@ if ($loggedIn && $action === 'set_admin_password') {
 
 $loggedIn = !empty($_SESSION['statuspigeon_admin_logged_in']);
 $csrf = (string) $_SESSION['statuspigeon_csrf'];
+$section = isset($_GET['section']) ? (string) $_GET['section'] : 'api';
+if (!in_array($section, array('api', 'logs', 'password'), true)) {
+    $section = 'api';
+}
 $generatedKey = isset($_SESSION['statuspigeon_generated_key'])
     ? (string) $_SESSION['statuspigeon_generated_key'] : '';
 unset($_SESSION['statuspigeon_generated_key']);
@@ -171,9 +175,37 @@ $localPath = statuspigeon_admin_local_path();
 $localWritable = is_file($localPath) ? is_writable($localPath) : is_writable(__DIR__);
 $basePath = isset($_SERVER['SCRIPT_NAME']) ? dirname((string) $_SERVER['SCRIPT_NAME']) : '';
 $basePath = $basePath === '/' || $basePath === '.' ? '' : rtrim($basePath, '/');
-$reportUrl = $basePath . '/report/';
+$configuredBaseUrl = isset($config['public_base_url']) ? trim((string) $config['public_base_url']) : '';
+if ($configuredBaseUrl !== '') {
+    $publicBaseUrl = rtrim($configuredBaseUrl, '/');
+} else {
+    $scheme = 'https';
+    if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
+        $forwardedProto = trim(explode(',', (string) $_SERVER['HTTP_X_FORWARDED_PROTO'])[0]);
+        if (preg_match('/^https?$/i', $forwardedProto)) {
+            $scheme = strtolower($forwardedProto);
+        }
+    } elseif (!empty($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) !== 'off') {
+        $scheme = 'https';
+    } elseif (isset($_SERVER['SERVER_PORT']) && (int) $_SERVER['SERVER_PORT'] === 80) {
+        $scheme = 'http';
+    }
+    $host = isset($_SERVER['HTTP_HOST']) ? trim((string) $_SERVER['HTTP_HOST']) : 'localhost';
+    $publicBaseUrl = $scheme . '://' . $host . $basePath;
+}
+$reportUrl = rtrim($publicBaseUrl, '/') . '/report/';
 $currentKey = (string) $config['api_key'];
 $adminPasswordConfigured = trim((string) $config['admin_password_hash']) !== '';
+$logReports = array();
+$logError = '';
+if ($loggedIn && $section === 'logs') {
+    try {
+        $logReports = statuspigeon_recent_reports($pdo, 100);
+    } catch (Exception $e) {
+        $logError = '日志查询失败';
+        error_log('Status Pigeon log query failed: ' . $e->getMessage());
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -221,7 +253,7 @@ $adminPasswordConfigured = trim((string) $config['admin_password_hash']) !== '';
     <?php else: ?>
       <header class="admin-head">
         <h1>Status Pigeon 管理</h1>
-        <p class="host-meta">接收地址：<code><?php echo statuspigeon_admin_escape($reportUrl); ?></code></p>
+        <p class="host-meta">完整接收地址：<code class="break-code"><?php echo statuspigeon_admin_escape($reportUrl); ?></code></p>
       </header>
 
       <?php if (!$localWritable): ?>
@@ -230,38 +262,130 @@ $adminPasswordConfigured = trim((string) $config['admin_password_hash']) !== '';
         </div>
       <?php endif; ?>
 
-      <?php if ($generatedKey !== ''): ?>
-        <section class="admin-card admin-key-result">
-          <h2>新的 API key</h2>
-          <p>请立即复制并更新所有 agent；出于安全原因，刷新页面后不会再次显示完整 key。</p>
-          <code class="api-key-value"><?php echo statuspigeon_admin_escape($generatedKey); ?></code>
-        </section>
-      <?php endif; ?>
+      <div class="admin-layout">
+        <nav class="admin-menu" aria-label="管理菜单">
+          <a class="<?php echo $section === 'api' ? 'active' : ''; ?>" href="admin.php?section=api">API Key 管理</a>
+          <a class="<?php echo $section === 'logs' ? 'active' : ''; ?>" href="admin.php?section=logs">日志查询</a>
+          <a class="<?php echo $section === 'password' ? 'active' : ''; ?>" href="admin.php?section=password">密码管理</a>
+        </nav>
+        <main class="admin-content">
+          <?php if ($section === 'api'): ?>
+            <?php if ($generatedKey !== ''): ?>
+              <section class="admin-card admin-key-result">
+                <h2>新的 API key</h2>
+                <p>请立即复制并更新所有 agent；出于安全原因，刷新页面后不会再次显示完整 key。</p>
+                <div class="api-key-copy-row">
+                  <code id="generated-api-key" class="api-key-value"><?php echo statuspigeon_admin_escape($generatedKey); ?></code>
+                  <button type="button" id="copy-api-key" class="copy-button">复制</button>
+                </div>
+                <p id="copy-api-key-status" class="copy-status" aria-live="polite"></p>
+              </section>
+            <?php endif; ?>
 
-      <section class="admin-card">
-        <h2>API key</h2>
-        <p>当前 key：<?php echo $currentKey === '' ? '<em>未配置</em>' : '<code>' . statuspigeon_admin_escape(substr($currentKey, 0, 6)) . '••••••••</code>'; ?></p>
-        <form method="post" onsubmit="return confirm('生成新 API key 后，旧 key 会立即失效。确定继续吗？');">
-          <input type="hidden" name="action" value="generate_api_key">
-          <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
-          <button type="submit" class="danger-button">生成新 API key</button>
-        </form>
-      </section>
-
-      <section class="admin-card">
-        <h2>管理密码</h2>
-        <p class="host-meta">设置后，下一次登录使用管理密码，不再依赖 API key。</p>
-        <form method="post" class="admin-form">
-          <input type="hidden" name="action" value="set_admin_password">
-          <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
-          <label for="admin_password">新管理密码</label>
-          <input id="admin_password" name="admin_password" type="password" minlength="12" autocomplete="new-password" required>
-          <label for="admin_password_confirm">再次输入</label>
-          <input id="admin_password_confirm" name="admin_password_confirm" type="password" minlength="12" autocomplete="new-password" required>
-          <button type="submit">保存管理密码</button>
-        </form>
-      </section>
+            <section class="admin-card">
+              <h2>API Key 管理</h2>
+              <p>当前 key：<?php echo $currentKey === '' ? '<em>未配置</em>' : '<code>' . statuspigeon_admin_escape(substr($currentKey, 0, 6)) . '••••••••</code>'; ?></p>
+              <p class="host-meta">完整接收地址：<code class="break-code"><?php echo statuspigeon_admin_escape($reportUrl); ?></code></p>
+              <form method="post" action="admin.php?section=api" onsubmit="return confirm('生成新 API key 后，旧 key 会立即失效。确定继续吗？');">
+                <input type="hidden" name="action" value="generate_api_key">
+                <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
+                <button type="submit" class="danger-button">生成新 API key</button>
+              </form>
+            </section>
+          <?php elseif ($section === 'logs'): ?>
+            <section class="admin-card">
+              <h2>日志查询</h2>
+              <p class="host-meta">显示最近 100 条已接收 report 的记录。</p>
+              <?php if ($logError !== ''): ?>
+                <div class="admin-message admin-error"><?php echo statuspigeon_admin_escape($logError); ?></div>
+              <?php elseif (!$logReports): ?>
+                <p class="empty">暂无接收记录。</p>
+              <?php else: ?>
+                <div class="log-table-wrap">
+                  <table class="log-table">
+                    <thead>
+                      <tr><th>时间</th><th>主机</th><th>CPU</th><th>MEM</th><th>主机状态</th></tr>
+                    </thead>
+                    <tbody>
+                      <?php foreach ($logReports as $log): ?>
+                        <?php
+                        $logStatus = (string) $log['last_status'];
+                        $logStatusLabel = $logStatus === 'degraded' ? '性能降级'
+                            : ($logStatus === 'operational' ? '运行正常' : ($logStatus ?: '未知'));
+                        ?>
+                        <tr>
+                          <td><?php echo statuspigeon_admin_escape(date('Y-m-d H:i:s', (int) $log['ts'])); ?></td>
+                          <td><?php echo statuspigeon_admin_escape($log['hostname']); ?></td>
+                          <td><?php echo statuspigeon_admin_escape(number_format((float) $log['cpu_usage'], 1)); ?>%</td>
+                          <td><?php echo statuspigeon_admin_escape(number_format((float) $log['mem_usage'], 1)); ?>%</td>
+                          <td><span class="badge badge-<?php echo statuspigeon_admin_escape($logStatus === 'operational' || $logStatus === 'degraded' ? $logStatus : 'no-data'); ?>"><?php echo statuspigeon_admin_escape($logStatusLabel); ?></span></td>
+                        </tr>
+                      <?php endforeach; ?>
+                    </tbody>
+                  </table>
+                </div>
+              <?php endif; ?>
+            </section>
+          <?php else: ?>
+            <section class="admin-card">
+              <h2>密码管理</h2>
+              <p class="host-meta">设置后，下一次登录使用管理密码，不再依赖 API key。</p>
+              <form method="post" action="admin.php?section=password" class="admin-form">
+                <input type="hidden" name="action" value="set_admin_password">
+                <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
+                <label for="admin_password">新管理密码</label>
+                <input id="admin_password" name="admin_password" type="password" minlength="12" autocomplete="new-password" required>
+                <label for="admin_password_confirm">再次输入</label>
+                <input id="admin_password_confirm" name="admin_password_confirm" type="password" minlength="12" autocomplete="new-password" required>
+                <button type="submit">保存管理密码</button>
+              </form>
+            </section>
+          <?php endif; ?>
+        </main>
+      </div>
     <?php endif; ?>
   </div>
+  <?php if ($generatedKey !== ''): ?>
+  <script>
+    (function () {
+      var button = document.getElementById('copy-api-key');
+      var value = document.getElementById('generated-api-key');
+      var status = document.getElementById('copy-api-key-status');
+      if (!button || !value || !status) return;
+
+      function copied() {
+        status.textContent = '已复制完整 API key';
+        button.textContent = '已复制';
+        window.setTimeout(function () { button.textContent = '复制'; }, 1800);
+      }
+
+      function failed() {
+        status.textContent = '复制失败，请手动选择并复制';
+      }
+
+      button.addEventListener('click', function () {
+        var text = value.textContent || '';
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(text).then(copied, failed);
+          return;
+        }
+        var input = document.createElement('textarea');
+        input.value = text;
+        input.setAttribute('readonly', '');
+        input.style.position = 'fixed';
+        input.style.opacity = '0';
+        document.body.appendChild(input);
+        input.select();
+        try {
+          if (document.execCommand('copy')) copied();
+          else failed();
+        } catch (error) {
+          failed();
+        }
+        document.body.removeChild(input);
+      });
+    }());
+  </script>
+  <?php endif; ?>
 </body>
 </html>

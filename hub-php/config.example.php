@@ -15,6 +15,10 @@ return array(
     // create this hash after the first login.
     'admin_password_hash' => '',
 
+    // Optional public URL used by the admin page to display the full report
+    // address. Leave empty to detect it from the current request.
+    'public_base_url' => '',
+
     // Prefer a path outside the public document root.
     'db_path' => dirname(__DIR__) . '/statuspigeon-data/statuspigeon.sqlite',
 

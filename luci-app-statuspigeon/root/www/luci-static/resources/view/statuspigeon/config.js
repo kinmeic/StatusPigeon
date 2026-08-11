@@ -86,18 +86,37 @@ function parseStatusFile(contents) {
 }
 
 function refreshStatus() {
-	return fs.read('/var/run/statuspigeon/last-report').then(function (contents) {
-		var data = parseStatusFile(contents);
+	return fs.exec('/usr/bin/statuspigeon-status', [], null).then(function (result) {
+		if (result.code !== 0)
+			throw new Error(result.stderr || _('Status command failed'));
+
+		var data;
+		try {
+			data = JSON.parse(result.stdout || '{}');
+		} catch (error) {
+			throw new Error(_('Invalid status response'));
+		}
 		renderStatus(data);
 		return data;
 	}, function (error) {
-		if (error && (error.name === 'NotFoundError' || error.name === 'NoDataError')) {
-			var data = emptyStatus();
+		/*
+		 * The command ACL exists in older package revisions and keeps already
+		 * logged-in LuCI sessions working. The direct file fallback uses /tmp,
+		 * avoiding /var/run symlink ACL mismatches on OpenWrt.
+		 */
+		return fs.read('/tmp/statuspigeon/last-report').then(function (contents) {
+			var data = parseStatusFile(contents);
 			renderStatus(data);
 			return data;
-		}
-		renderStatusError(error);
-		return null;
+		}, function (fileError) {
+			if (fileError && (fileError.name === 'NotFoundError' || fileError.name === 'NoDataError')) {
+				var data = emptyStatus();
+				renderStatus(data);
+				return data;
+			}
+			renderStatusError(fileError || error);
+			return null;
+		});
 	});
 }
 

@@ -446,6 +446,8 @@ function statuspigeon_hosts($pdo)
     );
     $out = array();
     foreach ($query->fetchAll() as $row) {
+        $summary = json_decode((string) $row['last_summary'], true);
+        $summary = is_array($summary) ? $summary : array();
         $out[] = array(
             'id' => (int) $row['id'],
             'hostname' => (string) $row['hostname'],
@@ -456,10 +458,31 @@ function statuspigeon_hosts($pdo)
             'last_seen' => (int) $row['last_seen'],
             'last_status' => (string) $row['last_status'],
             'last_summary' => (string) $row['last_summary'],
+            'os_version' => isset($summary['os_version']) ? (string) $summary['os_version'] : '',
+            'ipv4' => isset($summary['ipv4']) && is_array($summary['ipv4'])
+                ? $summary['ipv4'] : array(),
+            'ipv6' => isset($summary['ipv6']) && is_array($summary['ipv6'])
+                ? $summary['ipv6'] : array(),
             'source' => (string) $row['source'],
         );
     }
     return $out;
+}
+
+function statuspigeon_recent_reports($pdo, $limit)
+{
+    $limit = max(1, min(500, (int) $limit));
+    $query = $pdo->query(
+        'SELECT metrics_raw.ts, metrics_raw.cpu_usage, metrics_raw.mem_usage,
+                metrics_raw.load1, metrics_raw.disk_read_bps,
+                metrics_raw.disk_write_bps, metrics_raw.network_rx_bps,
+                metrics_raw.network_tx_bps, hosts.hostname, hosts.last_status
+         FROM metrics_raw
+         INNER JOIN hosts ON hosts.id = metrics_raw.host_id
+         ORDER BY metrics_raw.ts DESC, metrics_raw.id DESC
+         LIMIT ' . $limit
+    );
+    return $query->fetchAll();
 }
 
 function statuspigeon_daily($pdo, $hostId, $days)
