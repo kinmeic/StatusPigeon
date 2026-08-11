@@ -50,4 +50,8 @@ define Package/luci-app-statuspigeon/install
 	$(INSTALL_DATA) ./root/www/luci-static/resources/view/statuspigeon/config.js $(1)/www/luci-static/resources/view/statuspigeon/config.js
 endef
 
+# This is a files-only package; there is no source tree to compile.
+define Build/Compile
+endef
+
 $(eval $(call BuildPackage,luci-app-statuspigeon))
