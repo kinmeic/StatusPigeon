@@ -91,6 +91,7 @@ func collectOs(out *pkgmetrics.OsInfo) error {
 		osName = runtime.GOOS
 	}
 	out.Os = osName
+	out.Version = info.PlatformVersion
 	out.Kernel = info.KernelVersion
 	out.Arch = runtime.GOARCH
 	out.Uptime = info.Uptime

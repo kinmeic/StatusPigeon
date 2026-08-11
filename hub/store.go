@@ -493,8 +493,8 @@ func boolToInt(b bool) int {
 // hostSummary 生成状态页徽章用的精简摘要 JSON。
 func hostSummary(m pkgmetrics.Metrics) string {
 	cpu, mem, load1 := m.Cpu.Usage, m.Mem.UsedPct, m.Cpu.Load1
-	return fmt.Sprintf(`{"cpu":%.1f,"mem":%.1f,"load1":%.2f,"uptime":%d,"os":%q,"ipv4":%s,"ipv6":%s}`,
-		cpu, mem, load1, m.Os.Uptime, m.Os.Os,
+	return fmt.Sprintf(`{"cpu":%.1f,"mem":%.1f,"load1":%.2f,"uptime":%d,"os":%q,"os_version":%q,"ipv4":%s,"ipv6":%s}`,
+		cpu, mem, load1, m.Os.Uptime, m.Os.Os, m.Os.Version,
 		jsonMarshalString(m.Os.IPv4), jsonMarshalString(m.Os.IPv6))
 }
 

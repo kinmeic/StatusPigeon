@@ -6,12 +6,13 @@ package metrics
 
 // OsInfo contains basic system information.
 type OsInfo struct {
-	Os     string   `json:"os"`
-	Kernel string   `json:"kernel"`
-	Arch   string   `json:"arch"`
-	Uptime uint64   `json:"uptime"` // 秒
-	IPv4   []string `json:"ipv4"`   // Non-loopback IPv4 addresses.
-	IPv6   []string `json:"ipv6"`   // Non-loopback IPv6 addresses.
+	Os      string   `json:"os"`
+	Version string   `json:"version"`
+	Kernel  string   `json:"kernel"`
+	Arch    string   `json:"arch"`
+	Uptime  uint64   `json:"uptime"` // 秒
+	IPv4    []string `json:"ipv4"`   // Non-loopback IPv4 addresses.
+	IPv6    []string `json:"ipv6"`   // Non-loopback IPv6 addresses.
 }
 
 // CPUInfo contains CPU usage and load averages.

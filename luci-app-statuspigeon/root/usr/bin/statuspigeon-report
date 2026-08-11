@@ -103,9 +103,11 @@ kernel="$(uname -r 2>/dev/null || echo unknown)"
 arch="$(uname -m 2>/dev/null || echo unknown)"
 
 os_name="OpenWrt"
+os_version=""
 if [ -r /etc/openwrt_release ]; then
 	os_from_file="$(sed -n 's/^DISTRIB_ID=//p' /etc/openwrt_release 2>/dev/null | head -n1 | tr -d "'")"
 	[ -n "$os_from_file" ] && os_name="$os_from_file"
+	os_version="$(sed -n 's/^DISTRIB_RELEASE=//p' /etc/openwrt_release 2>/dev/null | head -n1 | tr -d "'")"
 fi
 
 # Read cumulative counters from procfs. Rates are calculated over the same
@@ -190,6 +192,7 @@ json_add_int 'timestamp' "$timestamp"
 json_add_object 'metrics'
 	json_add_object 'os'
 	json_add_string 'os' "$os_name"
+	json_add_string 'version' "$os_version"
 	json_add_string 'kernel' "$kernel"
 	json_add_string 'arch' "$arch"
 	json_add_int 'uptime' "$uptime"

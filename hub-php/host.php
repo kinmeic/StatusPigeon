@@ -36,6 +36,7 @@ statuspigeon_admin_require_page();
           <h2>系统基础信息</h2>
           <dl class="system-info">
             <div class="system-info-row"><dt>操作系统</dt><dd id="host-os">—</dd></div>
+            <div class="system-info-row"><dt>系统版本</dt><dd id="host-os-version">—</dd></div>
             <div class="system-info-row"><dt>内核</dt><dd id="host-kernel">—</dd></div>
             <div class="system-info-row"><dt>架构</dt><dd id="host-arch">—</dd></div>
             <div class="system-info-row"><dt>运行时间</dt><dd id="host-uptime">—</dd></div>

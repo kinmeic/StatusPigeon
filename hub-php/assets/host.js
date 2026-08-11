@@ -77,6 +77,7 @@
       var summary = {};
       try { summary = JSON.parse(host.last_summary || '{}'); } catch (ignored) {}
       setText('host-os', host.os || summary.os || '—');
+      setText('host-os-version', summary.os_version || '—');
       setText('host-kernel', host.kernel || '—');
       setText('host-arch', host.arch || '—');
       setText('host-uptime', formatDuration(summary.uptime));

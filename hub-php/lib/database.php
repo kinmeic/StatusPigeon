@@ -156,6 +156,7 @@ function statuspigeon_normalize_report($input)
         'metrics' => array(
             'os' => array(
                 'os' => statuspigeon_string(isset($rawOS['os']) ? $rawOS['os'] : '', ''),
+                'version' => statuspigeon_string(isset($rawOS['version']) ? $rawOS['version'] : '', ''),
                 'kernel' => statuspigeon_string(isset($rawOS['kernel']) ? $rawOS['kernel'] : '', ''),
                 'arch' => statuspigeon_string(isset($rawOS['arch']) ? $rawOS['arch'] : '', ''),
                 'uptime' => statuspigeon_metric_int(isset($rawOS['uptime']) ? $rawOS['uptime'] : 0, 0),
@@ -210,6 +211,7 @@ function statuspigeon_summary($metrics)
         'load1' => round((float) $metrics['cpu']['load1'], 2),
         'uptime' => (int) $metrics['os']['uptime'],
         'os' => (string) $metrics['os']['os'],
+        'os_version' => (string) $metrics['os']['version'],
         'ipv4' => $metrics['os']['ipv4'],
         'ipv6' => $metrics['os']['ipv6'],
     );
