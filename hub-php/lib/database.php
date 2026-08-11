@@ -39,6 +39,7 @@ function statuspigeon_db($config)
             os TEXT,
             kernel TEXT,
             arch TEXT,
+            remote_ip TEXT,
             last_seen INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
             last_status TEXT,
@@ -73,6 +74,7 @@ function statuspigeon_db($config)
         $pdo->exec($statement);
     }
     statuspigeon_migrate_host_identity($pdo);
+    statuspigeon_ensure_host_remote_ip($pdo);
     // Existing databases may still contain legacy I/O columns.  They are
     // intentionally left in place for non-destructive upgrades, but no new
     // report reads or writes those columns.
@@ -89,6 +91,7 @@ function statuspigeon_migrate_host_identity($pdo)
         }
     }
     $hasDeviceId = isset($columnNames['device_id']);
+    $hasRemoteIp = isset($columnNames['remote_ip']);
     if ($hasDeviceId && !statuspigeon_hosts_have_unique_hostname($pdo)) {
         return;
     }
@@ -105,6 +108,7 @@ function statuspigeon_migrate_host_identity($pdo)
                 os TEXT,
                 kernel TEXT,
                 arch TEXT,
+                remote_ip TEXT,
                 last_seen INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 last_status TEXT,
@@ -115,12 +119,13 @@ function statuspigeon_migrate_host_identity($pdo)
         $deviceExpression = $hasDeviceId
             ? "CASE WHEN device_id IS NULL OR device_id = '' THEN ('legacy-hostname:' || hostname) ELSE device_id END"
             : "('legacy-hostname:' || hostname)";
+        $remoteIpExpression = $hasRemoteIp ? 'remote_ip' : 'NULL';
         $pdo->exec(
             'INSERT INTO hosts_new
-             (id, device_id, hostname, agent_version, os, kernel, arch, last_seen,
+             (id, device_id, hostname, agent_version, os, kernel, arch, remote_ip, last_seen,
               created_at, last_status, last_summary, source)
              SELECT id, ' . $deviceExpression . ', hostname, agent_version, os,
-                    kernel, arch, last_seen, created_at, last_status, last_summary,
+                    kernel, arch, ' . $remoteIpExpression . ', last_seen, created_at, last_status, last_summary,
                     source FROM hosts'
         );
         $pdo->exec('DROP TABLE hosts');
@@ -136,6 +141,17 @@ function statuspigeon_migrate_host_identity($pdo)
     } finally {
         $pdo->exec('PRAGMA foreign_keys=ON');
     }
+}
+
+function statuspigeon_ensure_host_remote_ip($pdo)
+{
+    $columns = $pdo->query('PRAGMA table_info(hosts)')->fetchAll();
+    foreach ($columns as $column) {
+        if (isset($column['name']) && $column['name'] === 'remote_ip') {
+            return;
+        }
+    }
+    $pdo->exec('ALTER TABLE hosts ADD COLUMN remote_ip TEXT');
 }
 
 function statuspigeon_hosts_have_unique_hostname($pdo)
@@ -285,7 +301,7 @@ function statuspigeon_json_encode($value)
     return $json;
 }
 
-function statuspigeon_ingest($pdo, $report, $config)
+function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
 {
     $status = statuspigeon_status_for_report($report, $config);
     $metrics = $report['metrics'];
@@ -294,6 +310,10 @@ function statuspigeon_ingest($pdo, $report, $config)
     $date = date('Y-m-d', $report['timestamp']);
     $payload = statuspigeon_json_encode($report);
     $deviceId = statuspigeon_report_device_id($report);
+    $remoteIp = trim((string) $remoteIp);
+    if ($remoteIp === '' || filter_var($remoteIp, FILTER_VALIDATE_IP) === false) {
+        $remoteIp = null;
+    }
 
     $pdo->beginTransaction();
     try {
@@ -320,9 +340,9 @@ function statuspigeon_ingest($pdo, $report, $config)
         if ($hostId <= 0) {
             $insertHost = $pdo->prepare(
                 'INSERT INTO hosts
-                 (device_id, hostname, agent_version, os, kernel, arch, last_seen,
+                 (device_id, hostname, agent_version, os, kernel, arch, remote_ip, last_seen,
                   created_at, last_status, last_summary, source)
-                 VALUES (:device_id, :hostname, :agent_version, :os, :kernel, :arch,
+                 VALUES (:device_id, :hostname, :agent_version, :os, :kernel, :arch, :remote_ip,
                          :last_seen, :created_at, :last_status, :last_summary, :source)'
             );
             $insertHost->execute(array(
@@ -332,6 +352,7 @@ function statuspigeon_ingest($pdo, $report, $config)
                 ':os' => $metrics['os']['os'],
                 ':kernel' => $metrics['os']['kernel'],
                 ':arch' => $metrics['os']['arch'],
+                ':remote_ip' => $remoteIp,
                 ':last_seen' => $now,
                 ':created_at' => $now,
                 ':last_status' => $status,
@@ -346,7 +367,7 @@ function statuspigeon_ingest($pdo, $report, $config)
 
         $updateHost = $pdo->prepare(
             'UPDATE hosts SET agent_version=:agent_version, os=:os, kernel=:kernel,
-             arch=:arch, last_seen=:last_seen, last_status=:last_status,
+             arch=:arch, remote_ip=COALESCE(:remote_ip, remote_ip), last_seen=:last_seen, last_status=:last_status,
              last_summary=:last_summary, source=:source WHERE id=:id'
         );
         $updateHost->execute(array(
@@ -354,6 +375,7 @@ function statuspigeon_ingest($pdo, $report, $config)
             ':os' => $metrics['os']['os'],
             ':kernel' => $metrics['os']['kernel'],
             ':arch' => $metrics['os']['arch'],
+            ':remote_ip' => $remoteIp,
             ':last_seen' => $now,
             ':last_status' => $status,
             ':last_summary' => $summary,
@@ -510,7 +532,8 @@ function statuspigeon_hosts($pdo)
     $query = $pdo->query(
         'SELECT id, COALESCE(device_id, \'\') AS device_id, hostname, COALESCE(os, \'\') AS os,
                 COALESCE(kernel, \'\') AS kernel, COALESCE(arch, \'\') AS arch,
-                COALESCE(agent_version, \'\') AS agent_version, last_seen,
+                COALESCE(agent_version, \'\') AS agent_version, COALESCE(remote_ip, \'\') AS remote_ip,
+                last_seen,
                 COALESCE(last_status, \'\') AS last_status,
                 COALESCE(last_summary, \'{}\') AS last_summary, source
          FROM hosts ORDER BY hostname'
@@ -527,6 +550,7 @@ function statuspigeon_hosts($pdo)
             'kernel' => (string) $row['kernel'],
             'arch' => (string) $row['arch'],
             'agent_version' => (string) $row['agent_version'],
+            'remote_ip' => (string) $row['remote_ip'],
             'last_seen' => (int) $row['last_seen'],
             'last_status' => (string) $row['last_status'],
             'last_summary' => (string) $row['last_summary'],

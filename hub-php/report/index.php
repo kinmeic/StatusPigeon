@@ -22,7 +22,7 @@ if (abs(time() - $report['timestamp']) > 300) {
 }
 
 try {
-    statuspigeon_ingest($pdo, $report, $config);
+    statuspigeon_ingest($pdo, $report, $config, statuspigeon_request_remote_ip());
 } catch (Exception $e) {
     error_log('Status Pigeon ingest failed: ' . $e->getMessage());
     statuspigeon_text_error('ingest failed', 500);

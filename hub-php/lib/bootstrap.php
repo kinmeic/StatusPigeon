@@ -140,6 +140,16 @@ function statuspigeon_request_body($config)
     return $body;
 }
 
+/** Return the IP address observed by the PHP server for the current request. */
+function statuspigeon_request_remote_ip()
+{
+    $value = isset($_SERVER['REMOTE_ADDR']) ? trim((string) $_SERVER['REMOTE_ADDR']) : '';
+    if ($value !== '' && filter_var($value, FILTER_VALIDATE_IP) !== false) {
+        return $value;
+    }
+    return '';
+}
+
 function statuspigeon_range_seconds($range)
 {
     switch (strtolower(trim((string) $range))) {

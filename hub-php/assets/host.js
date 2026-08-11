@@ -72,6 +72,7 @@
       setText('host-last-report', formatTimestamp(host.last_seen));
       setText('host-ipv4', formatIPList(host.ipv4 || summary.ipv4));
       setText('host-ipv6', formatIPList(host.ipv6 || summary.ipv6));
+      setText('host-remote-ip', host.remote_ip || '—');
     });
   }
 
