@@ -46,9 +46,9 @@
   }
 
   function formatBytes(value) {
-    var number = Math.max(0, Number(value || 0));
+    var number = Math.max(0, Number(value || 0)) / 1024;
     if (!isFinite(number)) return '—';
-    var units = ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s'];
+    var units = ['KB/s', 'MB/s', 'GB/s', 'TB/s'];
     var index = 0;
     while (number >= 1024 && index < units.length - 1) {
       number /= 1024;
@@ -79,7 +79,6 @@
       setText('host-os', host.os || summary.os || '—');
       setText('host-kernel', host.kernel || '—');
       setText('host-arch', host.arch || '—');
-      setText('host-agent', host.agent_version || '—');
       setText('host-uptime', formatDuration(summary.uptime));
       setText('host-last-report', formatTimestamp(host.last_seen));
       setText('host-ipv4', formatIPList(summary.ipv4));
@@ -93,33 +92,87 @@
     return isFinite(value) ? value : null;
   }
 
+  function formatAxisValue(value, percentage, rate) {
+    if (percentage) {
+      return (Math.abs(value) >= 10 ? value.toFixed(0) : value.toFixed(1)) + '%';
+    }
+    if (rate) return formatBytes(value);
+    return Math.abs(value) >= 10 ? value.toFixed(1) : value.toFixed(2);
+  }
+
+  function formatChartTime(timestamp) {
+    var date = new Date(Number(timestamp || 0) * 1000);
+    if (!timestamp || isNaN(date.getTime())) return '';
+    function pad(value) { return value < 10 ? '0' + value : String(value); }
+    return (date.getMonth() + 1) + '/' + date.getDate() + ' ' +
+      pad(date.getHours()) + ':' + pad(date.getMinutes());
+  }
+
+  function yAxisMarkup(min, max, percentage, rate, width, left, top, plotHeight, right) {
+    var tickCount = 4;
+    var markup = [];
+    for (var index = 0; index <= tickCount; index++) {
+      var ratio = index / tickCount;
+      var value = max - (max - min) * ratio;
+      var y = top + plotHeight * ratio;
+      markup.push('<line x1="' + left + '" y1="' + y.toFixed(2) + '" x2="' +
+        (width - right) + '" y2="' + y.toFixed(2) + '" class="chart-grid"/>');
+      markup.push('<text x="' + (left - 8) + '" y="' + y.toFixed(2) +
+        '" text-anchor="end" dominant-baseline="middle" class="chart-axis-label">' +
+        formatAxisValue(value, percentage, rate) + '</text>');
+    }
+    return markup.join('');
+  }
+
+  function xAxisMarkup(points, left, plotWidth, height, bottom) {
+    if (!points.length) return '';
+    var indexes = [0, Math.floor((points.length - 1) / 2), points.length - 1];
+    var markup = [];
+    indexes.forEach(function (index, position) {
+      if (indexes.indexOf(index) !== position) return;
+      var x = left + (points.length === 1 ? plotWidth / 2 : index * plotWidth / (points.length - 1));
+      var anchor = position === 0 ? 'start' : (position === indexes.length - 1 ? 'end' : 'middle');
+      var label = formatChartTime(points[index].ts);
+      if (!label) return;
+      markup.push('<text x="' + x.toFixed(2) + '" y="' + (height - bottom + 22) +
+        '" text-anchor="' + anchor + '" class="chart-axis-label">' + label + '</text>');
+    });
+    return markup.join('');
+  }
+
   function chart(elementId, points, field, color, percentage) {
     var element = document.getElementById(elementId);
-    var values = points.map(function (point) { return numericValue(point, field); })
-      .filter(function (value) { return value !== null; });
-    if (!values.length) {
+    var samples = points.map(function (point) {
+      return {point: point, value: numericValue(point, field)};
+    }).filter(function (sample) { return sample.value !== null; });
+    if (!samples.length) {
       element.innerHTML = '<p class="empty chart-empty">暂无数据</p>';
       return;
     }
-    var width = 800, height = 220, left = 42, right = 14, top = 12, bottom = 28;
+    var values = samples.map(function (sample) { return sample.value; });
+    var width = 800, height = 240, left = 64, right = 14, top = 16, bottom = 40;
     var min = percentage ? 0 : Math.min.apply(Math, values);
     var max = percentage ? 100 : Math.max.apply(Math, values);
     if (max <= min) max = min + 1;
     var plotWidth = width - left - right, plotHeight = height - top - bottom;
-    var coords = values.map(function (value, index) {
+    var coords = samples.map(function (sample, index) {
+      var value = sample.value;
       var x = left + (values.length === 1 ? plotWidth / 2 : index * plotWidth / (values.length - 1));
       var y = top + (max - value) * plotHeight / (max - min);
       return x.toFixed(2) + ',' + y.toFixed(2);
     });
     var area = left + ',' + (height - bottom) + ' ' + coords.join(' ') +
       ' ' + (width - right) + ',' + (height - bottom);
+    var grid = yAxisMarkup(min, max, percentage, false, width, left, top, plotHeight, right);
+    var times = xAxisMarkup(samples.map(function (sample) { return sample.point; }),
+      left, plotWidth, height, bottom);
     element.innerHTML = '<svg class="chart-svg" viewBox="0 0 ' + width + ' ' + height +
-      '" role="img" aria-label="趋势图"><line x1="' + left + '" y1="' + top +
+      '" role="img" aria-label="趋势图">' + grid + '<line x1="' + left + '" y1="' + top +
       '" x2="' + left + '" y2="' + (height - bottom) + '" class="axis"/><line x1="' +
       left + '" y1="' + (height - bottom) + '" x2="' + (width - right) + '" y2="' +
       (height - bottom) + '" class="axis"/><polygon points="' + area + '" fill="' +
       color + '" opacity="0.12"/><polyline points="' + coords.join(' ') + '" fill="none" stroke="' +
-      color + '" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+      color + '" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>' + times + '</svg>';
   }
 
   function multiChart(elementId, points, series) {
@@ -135,7 +188,7 @@
       element.innerHTML = '<p class="empty chart-empty">暂无数据</p>';
       return;
     }
-    var width = 800, height = 220, left = 42, right = 14, top = 12, bottom = 28;
+    var width = 800, height = 240, left = 64, right = 14, top = 16, bottom = 40;
     var min = 0, max = Math.max.apply(Math, allValues);
     if (max <= min) max = 1;
     var plotWidth = width - left - right, plotHeight = height - top - bottom;
@@ -156,11 +209,13 @@
       return '<span class="chart-legend-item"><i style="background:' + item.color + '"></i>' +
         escapeHtml(item.label) + '</span>';
     }).join('');
+    var grid = yAxisMarkup(min, max, false, true, width, left, top, plotHeight, right);
+    var times = xAxisMarkup(points, left, plotWidth, height, bottom);
     element.innerHTML = '<div class="chart-legend">' + legend + '</div><svg class="chart-svg" viewBox="0 0 ' +
-      width + ' ' + height + '" role="img" aria-label="趋势图"><line x1="' + left +
+      width + ' ' + height + '" role="img" aria-label="趋势图">' + grid + '<line x1="' + left +
       '" y1="' + top + '" x2="' + left + '" y2="' + (height - bottom) + '" class="axis"/><line x1="' +
       left + '" y1="' + (height - bottom) + '" x2="' + (width - right) + '" y2="' + (height - bottom) +
-      '" class="axis"/>' + lines + '</svg>';
+      '" class="axis"/>' + lines + times + '</svg>';
   }
 
   function loadCharts(range) {

@@ -28,8 +28,8 @@ statuspigeon_admin_require_page();
         <div class="chart-box"><h3>CPU 使用率 (%)</h3><div id="chart-cpu" class="chart"></div></div>
         <div class="chart-box"><h3>内存使用率 (%)</h3><div id="chart-mem" class="chart"></div></div>
         <div class="chart-box"><h3>系统负载 (load1)</h3><div id="chart-load" class="chart"></div></div>
-        <div class="chart-box"><h3>磁盘 I/O（bytes/s）</h3><div id="chart-disk" class="chart"></div></div>
-        <div class="chart-box"><h3>网络速度（bytes/s）</h3><div id="chart-network" class="chart"></div></div>
+        <div class="chart-box"><h3>磁盘 I/O（KB/s，自动换算）</h3><div id="chart-disk" class="chart"></div></div>
+        <div class="chart-box"><h3>网络速度（KB/s，自动换算）</h3><div id="chart-network" class="chart"></div></div>
       </main>
       <aside class="detail-sidebar">
         <section class="info-card">
@@ -38,7 +38,6 @@ statuspigeon_admin_require_page();
             <div class="system-info-row"><dt>操作系统</dt><dd id="host-os">—</dd></div>
             <div class="system-info-row"><dt>内核</dt><dd id="host-kernel">—</dd></div>
             <div class="system-info-row"><dt>架构</dt><dd id="host-arch">—</dd></div>
-            <div class="system-info-row"><dt>Agent</dt><dd id="host-agent">—</dd></div>
             <div class="system-info-row"><dt>运行时间</dt><dd id="host-uptime">—</dd></div>
             <div class="system-info-row"><dt>最近接收 report</dt><dd id="host-last-report">—</dd></div>
             <div class="system-info-row"><dt>IPv4</dt><dd id="host-ipv4">—</dd></div>
