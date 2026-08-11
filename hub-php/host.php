@@ -37,7 +37,7 @@ statuspigeon_admin_require_page();
             <div class="system-info-row"><dt>系统版本</dt><dd id="host-os-version">—</dd></div>
             <div class="system-info-row"><dt>内核</dt><dd id="host-kernel">—</dd></div>
             <div class="system-info-row"><dt>架构</dt><dd id="host-arch">—</dd></div>
-            <div class="system-info-row"><dt>CPU 型号</dt><dd id="host-cpu-model">—</dd></div>
+            <div class="system-info-row"><dt>型号</dt><dd id="host-cpu-model">—</dd></div>
             <div class="system-info-row"><dt>内存大小</dt><dd id="host-memory-total">—</dd></div>
             <div class="system-info-row"><dt>磁盘大小</dt><dd id="host-disk-total">—</dd></div>
             <div class="system-info-row"><dt>磁盘占用率</dt><dd id="host-disk-used-pct">—</dd></div>
