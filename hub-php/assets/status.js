@@ -30,7 +30,9 @@
   function summary(host) {
     var value = {};
     try { value = JSON.parse(host.last_summary || '{}'); } catch (ignored) {}
-    var ips = (value.ipv4 || []).concat(value.ipv6 || []).join(', ');
+    var ipv4 = Array.isArray(host.ipv4) ? host.ipv4 : (value.ipv4 || []);
+    var ipv6 = Array.isArray(host.ipv6) ? host.ipv6 : (value.ipv6 || []);
+    var ips = ipv4.concat(ipv6).join(', ');
     return [
       value.os,
       value.cpu === undefined ? '' : 'CPU ' + Number(value.cpu).toFixed(1) + '%',

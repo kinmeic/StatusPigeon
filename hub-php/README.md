@@ -18,7 +18,7 @@ POST /report/
 POST /report/index.php
 ```
 
-请求头支持 `Authorization: Bearer <api_key>` 和 `X-API-Key: <api_key>`。请求体就是 Go agent 使用的 JSON `Report`，时间戳允许服务器时间前后 5 分钟。每次接收时，Hub 还会记录 PHP 服务器观察到的 `REMOTE_ADDR`，作为主机的“服务端检测 IP”；该地址独立于 agent 上报的 IPv4/IPv6，并在主机详情页显示。
+请求头支持 `Authorization: Bearer <api_key>` 和 `X-API-Key: <api_key>`。请求体就是 Go agent 使用的 JSON `Report`，时间戳允许服务器时间前后 5 分钟。每次接收时，Hub 还会记录 PHP 服务器观察到的 `REMOTE_ADDR`，作为主机的服务端检测地址；它会与 agent 上报的 IPv4/IPv6 合并、按 IP 去重，并在详情页按 `IP@接口` 格式显示。Hub 自身无法知道该来源地址对应的客户端网络接口，因此这类地址使用 `@hub` 标记。
 
 ## 直接文件 API
 
@@ -33,7 +33,7 @@ POST /report/index.php
 
 PHP 没有后台进程，因此每次请求会顺带执行失联标记和保留期清理。默认规则与 Go Hub 相同：CPU 超过 90% 或内存超过 95% 标记 `degraded`，超过 3 个 5 分钟周期没有上报标记 `down`。
 
-主机详情页 `host.php?id=...` 与趋势接口需要先在 `admin.php` 登录；状态总览和状态 API 保持公开。详情页使用左宽右窄布局，左侧展示 CPU、内存与负载，右侧展示系统信息、agent 上报的 IP、服务端检测 IP 和最近接收时间。Hub 按 `device_id` 识别设备，Hostname 仅作显示名；磁盘 I/O 与网络瞬时速度不纳入采集、推送或存储。
+主机详情页 `host.php?id=...` 与趋势接口需要先在 `admin.php` 登录；状态总览和状态 API 保持公开。详情页使用左宽右窄布局，左侧展示 CPU、内存与负载，右侧展示系统信息、合并后的 IP 列表和最近接收时间。Hub 按 `device_id` 识别设备，Hostname 仅作显示名；磁盘 I/O 与网络瞬时速度不纳入采集、推送或存储。
 
 ## Agent 配置
 

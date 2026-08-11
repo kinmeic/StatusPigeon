@@ -129,7 +129,7 @@ trap 'rm -rf /tmp/statuspigeon-report.lock' EXIT HUP INT TERM
 
 hostname="${hostname:-$(cat /proc/sys/kernel/hostname 2>/dev/null || uname -n)}"
 agent_version="$(get_uci statuspigeon.main.agent_version)"
-agent_version="${agent_version:-luci-app-statuspigeon/1.0.6}"
+agent_version="${agent_version:-luci-app-statuspigeon/1.0.7}"
 uptime="$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)"
 kernel="$(uname -r 2>/dev/null || echo unknown)"
 arch="$(uname -m 2>/dev/null || echo unknown)"
@@ -240,8 +240,17 @@ json_add_ip_array() {
 
 # OpenWrt's network status service is the most reliable source of interface
 # addresses.  It also works on images where BusyBox's `ip` applet has a
-# reduced output format.  Keep the `ip` and `ifconfig` paths as fallbacks for
-# small/custom images without ubus or jsonfilter.
+# reduced output format.  WAN-like logical interfaces are emitted before LAN
+# interfaces, and every address carries its logical interface as @name.
+ip_interface_priority() {
+	interface_name="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+	case "$interface_name" in
+		*wan*|*wwan*) printf '0' ;;
+		*lan*) printf '1' ;;
+		*) printf '2' ;;
+	esac
+}
+
 collect_ubus_ip_addresses() {
 	command -v ubus >/dev/null 2>&1 || return 0
 	command -v jsonfilter >/dev/null 2>&1 || return 0
@@ -249,13 +258,22 @@ collect_ubus_ip_addresses() {
 	network_json="$(ubus call network.interface dump 2>/dev/null)"
 	[ -n "$network_json" ] || return 0
 
-	ipv4_values="$(printf '%s\n' "$network_json" | jsonfilter -e '@.interface[*]["ipv4-address"][*].address' 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
-	ipv6_values="$(printf '%s\n' "$network_json" | jsonfilter -e '@.interface[*]["ipv6-address"][*].address' 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
-	ipv6_prefix_values="$(printf '%s\n' "$network_json" | jsonfilter -e '@.interface[*]["ipv6-prefix-assignment"][*]["local-address"].address' 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
+	interface_names="$(printf '%s\n' "$network_json" | jsonfilter -e '@.interface[*].interface' 2>/dev/null)"
+	[ -n "$interface_names" ] || return 0
 
-	[ -n "$ipv4_values" ] && printf '%s\n' "$ipv4_values" | awk '{ print "inet", $0 }'
-	[ -n "$ipv6_values" ] && printf '%s\n' "$ipv6_values" | awk '{ print "inet6", $0 }'
-	[ -n "$ipv6_prefix_values" ] && printf '%s\n' "$ipv6_prefix_values" | awk '{ print "inet6", $0 }'
+	for priority in 0 1 2; do
+		for interface_name in $interface_names; do
+			[ "$(ip_interface_priority "$interface_name")" = "$priority" ] || continue
+
+			ipv4_values="$(printf '%s\n' "$network_json" | jsonfilter -e "@.interface[@.interface='$interface_name'][\"ipv4-address\"][*].address" 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
+			ipv6_values="$(printf '%s\n' "$network_json" | jsonfilter -e "@.interface[@.interface='$interface_name'][\"ipv6-address\"][*].address" 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
+			ipv6_prefix_values="$(printf '%s\n' "$network_json" | jsonfilter -e "@.interface[@.interface='$interface_name'][\"ipv6-prefix-assignment\"][*][\"local-address\"].address" 2>/dev/null | sed 's/^"//; s/"$//' | awk 'NF { print }')"
+
+			[ -n "$ipv4_values" ] && printf '%s\n' "$ipv4_values" | awk -v iface="$interface_name" '{ print "inet", $0 "@" iface }'
+			[ -n "$ipv6_values" ] && printf '%s\n' "$ipv6_values" | awk -v iface="$interface_name" '{ print "inet6", $0 "@" iface }'
+			[ -n "$ipv6_prefix_values" ] && printf '%s\n' "$ipv6_prefix_values" | awk -v iface="$interface_name" '{ print "inet6", $0 "@" iface }'
+		done
+	done
 }
 
 collect_ip_addresses() {
@@ -268,24 +286,39 @@ collect_ip_addresses() {
 	if command -v ip >/dev/null 2>&1; then
 		ip_output="$(ip addr show 2>/dev/null)"
 		[ -n "$ip_output" ] || ip_output="$(ip address show 2>/dev/null)"
-		if [ -n "$ip_output" ]; then
-			printf '%s\n' "$ip_output"
+		if printf '%s\n' "$ip_output" | awk '$1 == "inet" || $1 == "inet6" { found=1 } END { exit found ? 0 : 1 }'; then
+			printf '%s\n' "$ip_output" | awk '
+				/^[0-9]+: [^:]+:/ { interface_name=$2; sub(/:$/, "", interface_name) }
+				$1 == "inet" { print "inet", $2 "@" interface_name }
+				$1 == "inet6" { print "inet6", $2 "@" interface_name }
+			'
 			return
 		fi
 	fi
 	if command -v ifconfig >/dev/null 2>&1; then
 		ifconfig -a 2>/dev/null | awk '
+			/^[^[:space:]].*Link encap:/ { interface_name=$1 }
 			$1 == "inet" {
-				value = $2; sub(/^addr:/, "", value); print "inet", value
+				value = $2; sub(/^addr:/, "", value); print "inet", value "@" interface_name
 			}
-			$1 == "inet6" && $2 == "addr:" { print "inet6", $3 }
+			$1 == "inet6" && $2 == "addr:" { print "inet6", $3 "@" interface_name }
 		'
 	fi
 }
 
 ip_addresses="$(collect_ip_addresses)"
-ipv4="$(printf '%s\n' "$ip_addresses" | awk '$1 == "inet" {sub(/\/.*/, "", $2); if ($2 !~ /^127\./ && $2 !~ /^169\.254\./) print $2}' | tr '\n' ' ')"
-ipv6="$(printf '%s\n' "$ip_addresses" | awk '$1 == "inet6" {sub(/\/.*/, "", $2); if ($2 != "::1" && tolower($2) !~ /^fe80:/) print $2}' | tr '\n' ' ')"
+ipv4="$(printf '%s\n' "$ip_addresses" | awk '
+	$1 == "inet" {
+		value = $2; count = split(value, parts, "@"); address = parts[1]; sub(/\/.*/, "", address)
+		if (address !~ /^127\./ && address !~ /^169\.254\./ && !seen[address]++) print address (count > 1 ? "@" parts[2] : "")
+	}
+' | tr '\n' ' ')"
+ipv6="$(printf '%s\n' "$ip_addresses" | awk '
+	$1 == "inet6" {
+		value = $2; count = split(value, parts, "@"); address = parts[1]; sub(/\/.*/, "", address); key = tolower(address)
+		if (address != "::1" && key !~ /^fe80:/ && !seen[key]++) print address (count > 1 ? "@" parts[2] : "")
+	}
+' | tr '\n' ' ')"
 
 json_init
 json_add_string 'agent_version' "$agent_version"

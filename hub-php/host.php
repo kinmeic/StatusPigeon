@@ -41,7 +41,6 @@ statuspigeon_admin_require_page();
             <div class="system-info-row"><dt>最近接收</dt><dd id="host-last-report">—</dd></div>
             <div class="system-info-row"><dt>IPv4</dt><dd id="host-ipv4">—</dd></div>
             <div class="system-info-row"><dt>IPv6</dt><dd id="host-ipv6">—</dd></div>
-            <div class="system-info-row"><dt>服务端检测 IP</dt><dd id="host-remote-ip">—</dd></div>
           </dl>
         </section>
       </aside>

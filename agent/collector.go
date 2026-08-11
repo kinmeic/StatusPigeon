@@ -139,27 +139,96 @@ func collectOs(out *pkgmetrics.OsInfo) error {
 }
 
 // localIPs returns non-loopback, non-link-local IPv4 and IPv6 addresses.
+// Values include the logical interface name (for example
+// "192.168.0.68@usbwan") and WAN-like interfaces are ordered first.
 func localIPs() (ipv4, ipv6 []string) {
-	addrs, err := net.InterfaceAddrs()
+	interfaces, err := net.Interfaces()
 	if err != nil {
 		return nil, nil
 	}
-	for _, a := range addrs {
-		ipNet, ok := a.(*net.IPNet)
-		if !ok || ipNet.IP.IsLoopback() {
+	type interfaceIP struct {
+		name     string
+		address  string
+		priority int
+		ipv4     bool
+	}
+	entries := make([]interfaceIP, 0)
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		ip := ipNet.IP
-		if ip.IsLinkLocalUnicast() {
-			continue // 排除 link-local（IPv4 169.254/IPv6 fe80::）
+		addrs, addrErr := iface.Addrs()
+		if addrErr != nil {
+			continue
 		}
-		if v4 := ip.To4(); v4 != nil {
-			ipv4 = append(ipv4, v4.String())
+		for _, addr := range addrs {
+			ip := interfaceAddressIP(addr)
+			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+				continue // 排除 loopback/link-local（IPv4 169.254/IPv6 fe80::）
+			}
+			if v4 := ip.To4(); v4 != nil {
+				entries = append(entries, interfaceIP{
+					name: iface.Name, address: v4.String(),
+					priority: interfacePriority(iface.Name), ipv4: true,
+				})
+				continue
+			}
+			entries = append(entries, interfaceIP{
+				name: iface.Name, address: ip.String(),
+				priority: interfacePriority(iface.Name),
+			})
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].priority < entries[j].priority
+	})
+	seenIPv4 := make(map[string]bool)
+	seenIPv6 := make(map[string]bool)
+	for _, entry := range entries {
+		value := entry.address
+		if entry.name != "" {
+			value += "@" + entry.name
+		}
+		if entry.ipv4 {
+			if !seenIPv4[entry.address] {
+				seenIPv4[entry.address] = true
+				ipv4 = append(ipv4, value)
+			}
 		} else {
-			ipv6 = append(ipv6, ip.String())
+			key := strings.ToLower(entry.address)
+			if !seenIPv6[key] {
+				seenIPv6[key] = true
+				ipv6 = append(ipv6, value)
+			}
 		}
 	}
 	return ipv4, ipv6
+}
+
+func interfaceAddressIP(addr net.Addr) net.IP {
+	switch value := addr.(type) {
+	case *net.IPNet:
+		return value.IP
+	case *net.IPAddr:
+		return value.IP
+	default:
+		text := addr.String()
+		if slash := strings.IndexByte(text, '/'); slash >= 0 {
+			text = text[:slash]
+		}
+		return net.ParseIP(text)
+	}
+}
+
+func interfacePriority(name string) int {
+	name = strings.ToLower(name)
+	if strings.Contains(name, "wan") || strings.Contains(name, "wwan") {
+		return 0
+	}
+	if strings.Contains(name, "lan") {
+		return 1
+	}
+	return 2
 }
 
 func collectCPU(out *pkgmetrics.CPUInfo) error {

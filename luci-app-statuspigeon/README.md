@@ -9,6 +9,8 @@ OpenWrt LuCI app for the Status Pigeon push-only agent. The package uses the cur
 - Extra push after `ifup`/`ifupdate` through `/etc/hotplug.d/iface/95-statuspigeon`.
 - JSON body matches `pkg/metrics.Report` used by the Go agent and PHP hub,
   including a stable hashed `device_id`; `hostname` is only a display label.
+  IPv4/IPv6 values include the logical interface when available (for example
+  `192.168.0.68@usbwan`), with WAN-like interfaces reported before LAN ones.
 - No listen mode, inbound port, URL rewrite, `jq`, or resident HTTP server.
 
 ## Build and install

@@ -212,6 +212,52 @@ function statuspigeon_string_array($value)
     return $out;
 }
 
+function statuspigeon_ip_address_part($value)
+{
+    $value = trim((string) $value);
+    $separator = strrpos($value, '@');
+    if ($separator !== false && $separator > 0) {
+        return trim(substr($value, 0, $separator));
+    }
+    return $value;
+}
+
+/** Merge agent addresses with the PHP server's observed source address. */
+function statuspigeon_host_ip_list($values, $remoteIp, $family)
+{
+    $out = array();
+    $seen = array();
+    foreach (is_array($values) ? $values : array() as $value) {
+        $value = trim((string) $value);
+        $address = statuspigeon_ip_address_part($value);
+        if ($address === '') {
+            continue;
+        }
+        $flag = $family === 6 ? FILTER_FLAG_IPV6 : FILTER_FLAG_IPV4;
+        if (filter_var($address, FILTER_VALIDATE_IP, $flag) === false) {
+            continue;
+        }
+        $key = strtolower($address);
+        if (isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $out[] = $value;
+    }
+
+    $remoteIp = trim((string) $remoteIp);
+    $flag = $family === 6 ? FILTER_FLAG_IPV6 : FILTER_FLAG_IPV4;
+    if ($remoteIp !== '' && filter_var($remoteIp, FILTER_VALIDATE_IP, $flag) !== false) {
+        $key = strtolower($remoteIp);
+        if (!isset($seen[$key])) {
+            // The actual network interface is unknown to the Hub.  @hub
+            // distinguishes this observed address from an agent interface.
+            array_unshift($out, $remoteIp . '@hub');
+        }
+    }
+    return $out;
+}
+
 /** Normalize the shared Go Report JSON to a predictable PHP array shape. */
 function statuspigeon_normalize_report($input)
 {
@@ -542,6 +588,10 @@ function statuspigeon_hosts($pdo)
     foreach ($query->fetchAll() as $row) {
         $summary = json_decode((string) $row['last_summary'], true);
         $summary = is_array($summary) ? $summary : array();
+        $agentIPv4 = isset($summary['ipv4']) && is_array($summary['ipv4'])
+            ? $summary['ipv4'] : array();
+        $agentIPv6 = isset($summary['ipv6']) && is_array($summary['ipv6'])
+            ? $summary['ipv6'] : array();
         $out[] = array(
             'id' => (int) $row['id'],
             'device_id' => (string) $row['device_id'],
@@ -555,10 +605,8 @@ function statuspigeon_hosts($pdo)
             'last_status' => (string) $row['last_status'],
             'last_summary' => (string) $row['last_summary'],
             'os_version' => isset($summary['os_version']) ? (string) $summary['os_version'] : '',
-            'ipv4' => isset($summary['ipv4']) && is_array($summary['ipv4'])
-                ? $summary['ipv4'] : array(),
-            'ipv6' => isset($summary['ipv6']) && is_array($summary['ipv6'])
-                ? $summary['ipv6'] : array(),
+            'ipv4' => statuspigeon_host_ip_list($agentIPv4, $row['remote_ip'], 4),
+            'ipv6' => statuspigeon_host_ip_list($agentIPv6, $row['remote_ip'], 6),
             'source' => (string) $row['source'],
         );
     }

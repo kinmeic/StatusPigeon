@@ -11,8 +11,8 @@ type OsInfo struct {
 	Kernel  string   `json:"kernel"`
 	Arch    string   `json:"arch"`
 	Uptime  uint64   `json:"uptime"` // 秒
-	IPv4    []string `json:"ipv4"`   // Non-loopback IPv4 addresses.
-	IPv6    []string `json:"ipv6"`   // Non-loopback IPv6 addresses.
+	IPv4    []string `json:"ipv4"`   // Non-loopback IPv4 addresses, optionally suffixed with @interface.
+	IPv6    []string `json:"ipv6"`   // Non-loopback IPv6 addresses, optionally suffixed with @interface.
 }
 
 // CPUInfo contains CPU usage and load averages.

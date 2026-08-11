@@ -138,7 +138,7 @@ opkg install luci-app-statuspigeon_*.ipk
 
 | 类别 | 字段 |
 |------|------|
-| 基础 | device_id、os、os_version、kernel、arch、uptime、IPv4/IPv6 |
+| 基础 | device_id、os、os_version、kernel、arch、uptime、IPv4/IPv6（带接口名，如 `192.168.0.68@usbwan`） |
 | CPU | usage%、load1/5/15 |
 | 内存 | total/used/available、used_pct、swap_total/swap_used |
 
