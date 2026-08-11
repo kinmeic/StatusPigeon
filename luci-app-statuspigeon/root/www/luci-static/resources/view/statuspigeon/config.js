@@ -1,7 +1,84 @@
 'use strict';
 'require view';
 'require form';
+'require fs';
+'require ui';
 'require uci';
+
+var statusElementId = 'statuspigeon-last-status';
+var submitBusy = false;
+
+function formatTimestamp(value) {
+	var timestamp = Number(value || 0);
+	if (!timestamp)
+		return _('Never');
+
+	var date = new Date(timestamp * 1000);
+	return isNaN(date.getTime()) ? _('Unknown') : date.toLocaleString();
+}
+
+function statusLabel(value) {
+	switch (value) {
+	case 'success':
+		return _('Success');
+	case 'failure':
+		return _('Failed');
+	case 'pending':
+		return _('In progress');
+	default:
+		return _('No report recorded');
+	}
+}
+
+function renderStatus(data) {
+	var element = document.getElementById(statusElementId);
+	if (!element)
+		return;
+
+	var parts = [
+		_('Status') + ': ' + statusLabel(data.status),
+		_('Last attempt') + ': ' + formatTimestamp(data.last_attempt),
+		_('Last success') + ': ' + formatTimestamp(data.last_success)
+	];
+
+	if (data.reason)
+		parts.push(_('Reason') + ': ' + data.reason);
+	if (Number(data.http_code || 0) > 0)
+		parts.push(_('HTTP') + ': ' + data.http_code);
+	if (data.message)
+		parts.push(_('Message') + ': ' + data.message);
+
+	element.textContent = parts.join(' | ');
+}
+
+function renderStatusError(error) {
+	var element = document.getElementById(statusElementId);
+	if (!element)
+		return;
+
+	element.textContent = _('Unable to read report status') + ': ' +
+		(error && error.message ? error.message : _('Unknown error'));
+}
+
+function refreshStatus() {
+	return fs.exec('/usr/bin/statuspigeon-status', [], null).then(function (result) {
+		if (result.code !== 0)
+			throw new Error(result.stderr || _('Status command failed'));
+
+		var data;
+		try {
+			data = JSON.parse(result.stdout || '{}');
+		} catch (error) {
+			throw new Error(_('Invalid status response'));
+		}
+
+		renderStatus(data);
+		return data;
+	}, function (error) {
+		renderStatusError(error);
+		return null;
+	});
+}
 
 return view.extend({
 	load: function () {
@@ -12,57 +89,91 @@ return view.extend({
 		var map = new form.Map(
 			'statuspigeon',
 			_('Status Pigeon'),
-			_('通过 JSON push 将 OpenWrt 路由器状态发送到 Status Pigeon Hub。定时任务和网络事件均调用同一个 shell 上报脚本；此 app 不提供 listen 模式。')
+			_('Send OpenWrt router metrics to Status Pigeon Hub using JSON push reports. Periodic reports and network events use the same shell reporter. This app has no listen mode.')
 		);
 
 		var section = map.section(form.NamedSection, 'main', 'statuspigeon', _('Agent'));
 		section.anonymous = true;
 
-		var option = section.option(form.Flag, 'enabled', _('启用'));
+		var option = section.option(form.Flag, 'enabled', _('Enabled'));
 		option.rmempty = false;
 		option.default = '0';
 
-		option = section.option(form.Value, 'endpoint', _('目标网站地址'));
+		option = section.option(form.Value, 'endpoint', _('Target URL'));
 		option.rmempty = false;
-		option.placeholder = 'https://example.com/report/index.php';
-		option.description = _('可填写完整的 /report/index.php、/report/，或 Hub 根地址；根地址会自动补全 /report/index.php。');
+		option.placeholder = 'https://example.com/report/';
+		option.description = _('Recommended: https://example.com/report/. /report/index.php, /report, and a Hub base URL are also accepted. A base URL is normalized to /report/.');
 		option.validate = function (sectionId, value) {
 			if (!value || !/^https?:\/\//i.test(value))
-				return _('地址必须以 http:// 或 https:// 开头');
+				return _('The URL must start with http:// or https://');
 			return true;
 		};
 
 		option = section.option(form.Value, 'api_key', _('API key'));
 		option.password = true;
 		option.rmempty = false;
-		option.description = _('对应 Hub 的 api_key；发送时同时使用 Bearer 和 X-API-Key 请求头。');
+		option.description = _('The API key configured on the Hub. The reporter sends both Bearer and X-API-Key headers.');
 
-		option = section.option(form.Value, 'hostname', _('主机名'));
-		option.placeholder = _('留空则读取 /proc/sys/kernel/hostname');
-		option.description = _('用于状态页显示；留空使用路由器当前主机名。');
+		option = section.option(form.Value, 'hostname', _('Hostname'));
+		option.placeholder = _('/proc/sys/kernel/hostname if empty');
+		option.description = _('Name shown on the Hub status page. Leave empty to use the router hostname.');
 
-		option = section.option(form.Value, 'interval', _('定时上报间隔（秒）'));
+		option = section.option(form.Value, 'interval', _('Report interval (seconds)'));
 		option.datatype = 'uinteger';
 		option.default = '300';
 		option.rmempty = false;
-		option.description = _('最小 15 秒，默认 300 秒。');
+		option.description = _('Minimum 15 seconds; default 300 seconds.');
 
-		option = section.option(form.Value, 'timeout', _('HTTP 超时（秒）'));
+		option = section.option(form.Value, 'timeout', _('HTTP timeout (seconds)'));
 		option.datatype = 'uinteger';
 		option.default = '15';
 		option.rmempty = false;
 
-		option = section.option(form.Flag, 'report_on_network', _('网络事件上报'));
+		option = section.option(form.Flag, 'report_on_network', _('Report on network events'));
 		option.default = '1';
 		option.rmempty = false;
-		option.description = _('接口 ifup/ifupdate 后额外立即上报一次。');
+		option.description = _('Send an extra report after ifup or ifupdate.');
 
-		option = section.option(form.Value, 'network_delay', _('网络事件延迟（秒）'));
+		option = section.option(form.Value, 'network_delay', _('Network event delay (seconds)'));
 		option.datatype = 'uinteger';
 		option.default = '3';
 		option.rmempty = false;
-		option.description = _('等待 DHCP、PPPoE 等网络初始化完成后再发送。');
+		option.description = _('Wait for DHCP, PPPoE, and other network initialization before sending.');
 
-		return map.render();
+		var status = section.option(form.DummyValue, '_last_status', _('Last submission'));
+		status.rawhtml = true;
+		status.cfgvalue = function () {
+			return '<span id="' + statusElementId + '">' + _('Loading...') + '</span>';
+		};
+
+		var submit = section.option(form.Button, '_submit_now', _('Submit now'));
+		submit.inputtitle = _('Submit now');
+		submit.inputstyle = 'apply';
+		submit.description = _('Save the current settings and send a report immediately.');
+		submit.onclick = function () {
+			if (submitBusy)
+				return;
+
+			submitBusy = true;
+			return map.save().then(function () {
+				return fs.exec('/usr/bin/statuspigeon-report', [ 'manual' ], null);
+			}).then(function (result) {
+				if (result.code !== 0)
+					throw new Error(result.stderr || _('Report command failed'));
+
+				ui.addNotification(null, _('Report submitted successfully.'), 'info');
+			}, function (error) {
+				ui.addNotification(null, _('Report failed: ') +
+					(error && error.message ? error.message : _('Unknown error')), 'error');
+			}).then(function () {
+				submitBusy = false;
+				return refreshStatus();
+			});
+		};
+
+		return map.render().then(function (node) {
+			window.setTimeout(refreshStatus, 0);
+			return node;
+		});
 	}
 });

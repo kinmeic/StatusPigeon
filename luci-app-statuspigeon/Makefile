@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-statuspigeon
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=Status Pigeon contributors
 
@@ -14,7 +14,7 @@ define Package/luci-app-statuspigeon
   SUBMENU:=3. Applications
   TITLE:=Status Pigeon JSON reporting agent
   PKGARCH:=all
-  DEPENDS:=+luci-base +curl +ca-bundle +jshn
+  DEPENDS:=+luci-base +rpcd-mod-file +curl +ca-bundle +jshn
 endef
 
 define Package/luci-app-statuspigeon/description
@@ -39,6 +39,7 @@ define Package/luci-app-statuspigeon/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) ./root/usr/bin/statuspigeon-report $(1)/usr/bin/statuspigeon-report
 	$(INSTALL_BIN) ./root/usr/bin/statuspigeon-scheduler $(1)/usr/bin/statuspigeon-scheduler
+	$(INSTALL_BIN) ./root/usr/bin/statuspigeon-status $(1)/usr/bin/statuspigeon-status
 
 	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
 	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/luci-app-statuspigeon.json $(1)/usr/share/luci/menu.d/luci-app-statuspigeon.json

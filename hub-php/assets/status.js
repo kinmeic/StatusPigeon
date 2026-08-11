@@ -14,14 +14,16 @@
   }
 
   function state(hosts) {
-    var hasDown = false, hasDegraded = false;
+    var hasDown = false, hasDegraded = false, hasNoData = false;
     hosts.forEach(function (host) {
       if (host.last_status === 'down') hasDown = true;
       if (host.last_status === 'degraded') hasDegraded = true;
+      if (!host.last_status || host.last_status === 'no-data') hasNoData = true;
     });
     if (!hosts.length) return {cls: 'banner-nodata', text: '暂无监控数据'};
     if (hasDown) return {cls: 'banner-down', text: '部分系统故障'};
     if (hasDegraded) return {cls: 'banner-degraded', text: '部分系统降级'};
+    if (hasNoData) return {cls: 'banner-nodata', text: '部分系统暂无数据'};
     return {cls: 'banner-ok', text: '所有系统运行正常'};
   }
 
@@ -48,13 +50,18 @@
   function hostCard(host) {
     var badge = host.last_status || 'no-data';
     var daily = Array.isArray(host.daily) ? host.daily : [];
+    var lastSeen = host.last_seen ? new Date(Number(host.last_seen) * 1000).toLocaleString('zh-CN') : '—';
     return '<article class="host-card"><div class="host-top"><div class="host-left">' +
       '<a class="host-name" href="host.php?id=' + encodeURIComponent(host.id) + '">' +
       escapeHtml(host.hostname) + '</a><span class="badge badge-' + escapeHtml(badge) + '">' +
       escapeHtml(labels[badge] || badge) + '</span></div><span class="host-uptime">' +
       (host.uptime_pct === undefined ? '—' : Number(host.uptime_pct).toFixed(2) + '%') +
       '</span></div><div class="host-meta">' + escapeHtml(summary(host)) +
-      '</div><div class="bar">' + daily.map(dayBlock).join('') + '</div></article>';
+      '</div><div class="host-meta host-last-seen">最近接收：' + escapeHtml(lastSeen) +
+      '</div><div class="bar" style="--bar-days:' + daily.length + '" role="img" aria-label="最近 ' +
+      daily.length + ' 天状态">' + daily.map(dayBlock).join('') + '</div><div class="bar-caption"><span>' +
+      (daily.length ? escapeHtml(daily[0].date) : '') + '</span><span>' +
+      (daily.length ? escapeHtml(daily[daily.length - 1].date) : '') + '</span></div></article>';
   }
 
   function render(hosts) {
@@ -62,13 +69,24 @@
     var banner = document.getElementById('overall');
     banner.className = 'banner ' + overall.cls;
     banner.textContent = overall.text;
+    // A fully healthy fleet is the default state, so keep the page quiet and
+    // reserve the top banner for degraded, down, or no-data conditions.
+    banner.hidden = overall.cls === 'banner-ok';
     var list = document.getElementById('host-list');
     list.innerHTML = hosts.length ? hosts.map(hostCard).join('') :
       '<p class="empty">还没有主机上报数据。</p>';
   }
 
+  function requestedDays() {
+    return window.matchMedia && window.matchMedia('(max-width: 640px)').matches ? 30 : 60;
+  }
+
+  var lastRequestedDays = requestedDays();
+
   function refresh() {
-    fetch('api/status.php?days=90').then(function (response) {
+    var days = requestedDays();
+    lastRequestedDays = days;
+    fetch('api/status.php?days=' + days).then(function (response) {
       if (!response.ok) throw new Error('HTTP ' + response.status);
       return response.json();
     }).then(function (hosts) {
@@ -78,10 +96,15 @@
     }).catch(function (error) {
       var banner = document.getElementById('overall');
       banner.className = 'banner banner-down';
+      banner.hidden = false;
       banner.textContent = '加载失败：' + error.message;
     });
   }
 
   refresh();
   window.setInterval(refresh, 60000);
+  window.addEventListener('resize', function () {
+    var days = requestedDays();
+    if (days !== lastRequestedDays) refresh();
+  });
 }());

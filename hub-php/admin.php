@@ -7,11 +7,8 @@
  * independent password can be stored in config.local.php.
  */
 require_once __DIR__ . '/lib/bootstrap.php';
-
-session_name('statuspigeon_admin');
-if (session_status() !== PHP_SESSION_ACTIVE) {
-    @session_start();
-}
+require_once __DIR__ . '/lib/auth.php';
+statuspigeon_admin_session_start();
 
 if (empty($_SESSION['statuspigeon_csrf'])) {
     $_SESSION['statuspigeon_csrf'] = bin2hex(random_bytes(16));
@@ -22,13 +19,13 @@ function statuspigeon_admin_escape($value)
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function statuspigeon_admin_redirect($message, $isError)
+function statuspigeon_admin_redirect($message, $isError, $location)
 {
     $_SESSION['statuspigeon_flash'] = array(
         'message' => (string) $message,
         'error' => (bool) $isError,
     );
-    header('Location: admin.php');
+    header('Location: ' . $location);
     exit;
 }
 
@@ -99,23 +96,26 @@ function statuspigeon_admin_credential_ok($credential, $config)
 $flash = isset($_SESSION['statuspigeon_flash']) ? $_SESSION['statuspigeon_flash'] : null;
 unset($_SESSION['statuspigeon_flash']);
 $action = isset($_POST['action']) ? (string) $_POST['action'] : '';
+$returnCandidate = isset($_POST['return']) ? $_POST['return'] : (isset($_GET['return']) ? $_GET['return'] : '');
+$returnUrl = statuspigeon_admin_return_url($returnCandidate);
+$adminLocation = 'admin.php' . ($returnUrl === 'admin.php' ? '' : '?return=' . rawurlencode($returnUrl));
 
 if ($action === 'login') {
     if (!statuspigeon_admin_csrf_ok()) {
-        statuspigeon_admin_redirect('登录页面已过期，请重试', true);
+        statuspigeon_admin_redirect('登录页面已过期，请重试', true, $adminLocation);
     }
     $credential = isset($_POST['credential']) ? $_POST['credential'] : '';
     if (!statuspigeon_admin_credential_ok($credential, $config)) {
-        statuspigeon_admin_redirect('凭据不正确', true);
+        statuspigeon_admin_redirect('凭据不正确', true, $adminLocation);
     }
     session_regenerate_id(true);
     $_SESSION['statuspigeon_admin_logged_in'] = true;
-    statuspigeon_admin_redirect('登录成功', false);
+    statuspigeon_admin_redirect('登录成功', false, $returnUrl);
 }
 
 if ($action === 'logout') {
     if (!statuspigeon_admin_csrf_ok()) {
-        statuspigeon_admin_redirect('请求校验失败', true);
+        statuspigeon_admin_redirect('请求校验失败', true, 'admin.php');
     }
     $_SESSION = array();
     session_destroy();
@@ -126,39 +126,39 @@ if ($action === 'logout') {
 $loggedIn = !empty($_SESSION['statuspigeon_admin_logged_in']);
 if ($loggedIn && $action === 'generate_api_key') {
     if (!statuspigeon_admin_csrf_ok()) {
-        statuspigeon_admin_redirect('请求校验失败', true);
+        statuspigeon_admin_redirect('请求校验失败', true, 'admin.php');
     }
     try {
         $newKey = bin2hex(random_bytes(32));
         statuspigeon_admin_write_local(array('api_key' => $newKey));
         $_SESSION['statuspigeon_generated_key'] = $newKey;
-        statuspigeon_admin_redirect('新的 API key 已保存', false);
+        statuspigeon_admin_redirect('新的 API key 已保存', false, 'admin.php');
     } catch (Exception $e) {
-        statuspigeon_admin_redirect($e->getMessage(), true);
+        statuspigeon_admin_redirect($e->getMessage(), true, 'admin.php');
     }
 }
 
 if ($loggedIn && $action === 'set_admin_password') {
     if (!statuspigeon_admin_csrf_ok()) {
-        statuspigeon_admin_redirect('请求校验失败', true);
+        statuspigeon_admin_redirect('请求校验失败', true, 'admin.php');
     }
     $password = isset($_POST['admin_password']) ? (string) $_POST['admin_password'] : '';
     $confirm = isset($_POST['admin_password_confirm']) ? (string) $_POST['admin_password_confirm'] : '';
     if (strlen($password) < 12) {
-        statuspigeon_admin_redirect('管理密码至少需要 12 个字符', true);
+        statuspigeon_admin_redirect('管理密码至少需要 12 个字符', true, 'admin.php');
     }
     if ($password !== $confirm) {
-        statuspigeon_admin_redirect('两次输入的管理密码不一致', true);
+        statuspigeon_admin_redirect('两次输入的管理密码不一致', true, 'admin.php');
     }
     $hash = password_hash($password, PASSWORD_DEFAULT);
     if ($hash === false) {
-        statuspigeon_admin_redirect('无法生成管理密码 hash', true);
+        statuspigeon_admin_redirect('无法生成管理密码 hash', true, 'admin.php');
     }
     try {
         statuspigeon_admin_write_local(array('admin_password_hash' => $hash));
-        statuspigeon_admin_redirect('管理密码已更新', false);
+        statuspigeon_admin_redirect('管理密码已更新', false, 'admin.php');
     } catch (Exception $e) {
-        statuspigeon_admin_redirect($e->getMessage(), true);
+        statuspigeon_admin_redirect($e->getMessage(), true, 'admin.php');
     }
 }
 
@@ -171,7 +171,7 @@ $localPath = statuspigeon_admin_local_path();
 $localWritable = is_file($localPath) ? is_writable($localPath) : is_writable(__DIR__);
 $basePath = isset($_SERVER['SCRIPT_NAME']) ? dirname((string) $_SERVER['SCRIPT_NAME']) : '';
 $basePath = $basePath === '/' || $basePath === '.' ? '' : rtrim($basePath, '/');
-$reportUrl = $basePath . '/report/index.php';
+$reportUrl = $basePath . '/report/';
 $currentKey = (string) $config['api_key'];
 $adminPasswordConfigured = trim((string) $config['admin_password_hash']) !== '';
 ?>
@@ -212,6 +212,7 @@ $adminPasswordConfigured = trim((string) $config['admin_password_hash']) !== '';
         <form method="post" class="admin-form">
           <input type="hidden" name="action" value="login">
           <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
+          <input type="hidden" name="return" value="<?php echo statuspigeon_admin_escape($returnUrl); ?>">
           <label for="credential">API key / 管理密码</label>
           <input id="credential" name="credential" type="password" autocomplete="current-password" required autofocus>
           <button type="submit">登录</button>

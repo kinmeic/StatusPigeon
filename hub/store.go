@@ -48,7 +48,51 @@ func NewStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) createSchema() error {
-	_, err := s.db.Exec(schemaSQL)
+	if _, err := s.db.Exec(schemaSQL); err != nil {
+		return err
+	}
+	// Migrate databases created before disk/network rates were added. The
+	// column names are compile-time constants, not user input.
+	for _, column := range []string{
+		"disk_read_bps",
+		"disk_write_bps",
+		"network_rx_bps",
+		"network_tx_bps",
+	} {
+		if err := ensureMetricsColumn(s.db, column); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureMetricsColumn(db *sql.DB, column string) error {
+	rows, err := db.Query(`PRAGMA table_info(metrics_raw)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue interface{}
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if found {
+		return nil
+	}
+	_, err = db.Exec("ALTER TABLE metrics_raw ADD COLUMN " + column + " REAL")
 	return err
 }
 
@@ -68,13 +112,17 @@ CREATE TABLE IF NOT EXISTS hosts (
 );
 
 CREATE TABLE IF NOT EXISTS metrics_raw (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    host_id    INTEGER NOT NULL,
-    ts         INTEGER NOT NULL,
-    cpu_usage  REAL,
-    mem_usage  REAL,
-    load1      REAL,
-    payload    TEXT NOT NULL,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    host_id         INTEGER NOT NULL,
+    ts              INTEGER NOT NULL,
+    cpu_usage       REAL,
+    mem_usage       REAL,
+    load1           REAL,
+    disk_read_bps  REAL,
+    disk_write_bps REAL,
+    network_rx_bps REAL,
+    network_tx_bps REAL,
+    payload         TEXT NOT NULL,
     FOREIGN KEY(host_id) REFERENCES hosts(id)
 );
 CREATE INDEX IF NOT EXISTS idx_raw_host_ts ON metrics_raw(host_id, ts);
@@ -183,8 +231,13 @@ func insertMetrics(run sqlRunner, hostID int64, r *pkgmetrics.Report) error {
 	cpu, mem, load1 := r.Metrics.Cpu.Usage, r.Metrics.Mem.UsedPct, r.Metrics.Cpu.Load1
 	payload, _ := jsonMarshal(r)
 	_, err := run.Exec(
-		`INSERT INTO metrics_raw (host_id, ts, cpu_usage, mem_usage, load1, payload) VALUES (?, ?, ?, ?, ?, ?)`,
-		hostID, r.Timestamp, cpu, mem, load1, payload,
+		`INSERT INTO metrics_raw
+		 (host_id, ts, cpu_usage, mem_usage, load1, disk_read_bps, disk_write_bps,
+		  network_rx_bps, network_tx_bps, payload)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		hostID, r.Timestamp, cpu, mem, load1,
+		r.Metrics.Disk.ReadBps, r.Metrics.Disk.WriteBps,
+		r.Metrics.Network.RxBps, r.Metrics.Network.TxBps, payload,
 	)
 	return err
 }
@@ -366,8 +419,10 @@ const maxSeriesPoints = 10000
 // 超过 maxSeriesPoints 时取最新的 N 条。
 func (s *Store) MetricsSeries(hostID int64, fromTs int64) ([]MetricPoint, error) {
 	rows, err := s.db.Query(
-		`SELECT ts, cpu_usage, mem_usage, load1 FROM (
-		    SELECT ts, cpu_usage, mem_usage, load1 FROM metrics_raw
+		`SELECT ts, cpu_usage, mem_usage, load1, disk_read_bps, disk_write_bps,
+		        network_rx_bps, network_tx_bps FROM (
+		    SELECT ts, cpu_usage, mem_usage, load1, disk_read_bps, disk_write_bps,
+		           network_rx_bps, network_tx_bps FROM metrics_raw
 		    WHERE host_id=? AND ts >= ? ORDER BY ts DESC LIMIT ?
 		) ORDER BY ts`,
 		hostID, fromTs, maxSeriesPoints,
@@ -380,7 +435,8 @@ func (s *Store) MetricsSeries(hostID int64, fromTs int64) ([]MetricPoint, error)
 	var out []MetricPoint
 	for rows.Next() {
 		var p MetricPoint
-		if err := rows.Scan(&p.Ts, &p.CPU, &p.Mem, &p.Load); err != nil {
+		if err := rows.Scan(&p.Ts, &p.CPU, &p.Mem, &p.Load,
+			&p.DiskRead, &p.DiskWrite, &p.NetworkRx, &p.NetworkTx); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -390,10 +446,14 @@ func (s *Store) MetricsSeries(hostID int64, fromTs int64) ([]MetricPoint, error)
 
 // MetricPoint 单个指标样本。
 type MetricPoint struct {
-	Ts   int64    `json:"ts"`
-	CPU  *float64 `json:"cpu"`
-	Mem  *float64 `json:"mem"`
-	Load *float64 `json:"load1"`
+	Ts        int64    `json:"ts"`
+	CPU       *float64 `json:"cpu"`
+	Mem       *float64 `json:"mem"`
+	Load      *float64 `json:"load1"`
+	DiskRead  *float64 `json:"disk_read_bps"`
+	DiskWrite *float64 `json:"disk_write_bps"`
+	NetworkRx *float64 `json:"network_rx_bps"`
+	NetworkTx *float64 `json:"network_tx_bps"`
 }
 
 // Cleanup 删除早于 cutoffTs 的原始与聚合数据，返回两类各自的删除条数。

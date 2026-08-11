@@ -1,20 +1,20 @@
-// Package metrics 定义 Agent 与 Hub 共享的指标数据结构。
+// Package metrics defines the Agent and Hub shared metric data structures.
 //
-// 这套结构既是 push 上报体，也是 pull（GET /metrics）响应体，
-// 保证两端契约一致。
+// The same structures are used for push reports and pull (GET /metrics)
+// responses so both transport modes share one contract.
 package metrics
 
-// OsInfo 基础系统信息。
+// OsInfo contains basic system information.
 type OsInfo struct {
 	Os     string   `json:"os"`
 	Kernel string   `json:"kernel"`
 	Arch   string   `json:"arch"`
 	Uptime uint64   `json:"uptime"` // 秒
-	IPv4   []string `json:"ipv4"`   // 本机非回环 IPv4 地址（获取不到为空）
-	IPv6   []string `json:"ipv6"`   // 本机非回环 IPv6 地址（获取不到为空）
+	IPv4   []string `json:"ipv4"`   // Non-loopback IPv4 addresses.
+	IPv6   []string `json:"ipv6"`   // Non-loopback IPv6 addresses.
 }
 
-// CPUInfo CPU 与负载。
+// CPUInfo contains CPU usage and load averages.
 type CPUInfo struct {
 	Load1  float64 `json:"load1"`
 	Load5  float64 `json:"load5"`
@@ -22,7 +22,7 @@ type CPUInfo struct {
 	Usage  float64 `json:"usage"` // %
 }
 
-// MemInfo 内存。
+// MemInfo contains memory and swap usage.
 type MemInfo struct {
 	Total     uint64  `json:"total"`     // 字节
 	Used      uint64  `json:"used"`      // 字节
@@ -32,15 +32,32 @@ type MemInfo struct {
 	SwapUsed  uint64  `json:"swap_used"`
 }
 
-// Metrics 汇总三类指标。
-type Metrics struct {
-	Os  OsInfo  `json:"os"`
-	Cpu CPUInfo `json:"cpu"`
-	Mem MemInfo `json:"mem"`
+// DiskIOInfo contains cumulative disk counters and their sampling rate.
+type DiskIOInfo struct {
+	ReadBytes  uint64  `json:"read_bytes"`
+	WriteBytes uint64  `json:"write_bytes"`
+	ReadBps    float64 `json:"read_bps"`
+	WriteBps   float64 `json:"write_bps"`
 }
 
-// Report 是 push 模式单次上报的完整 JSON 结构；
-// pull 模式（GET /metrics）同样返回此结构。
+// NetworkIOInfo contains cumulative network counters and their sampling rate.
+type NetworkIOInfo struct {
+	RxBytes uint64  `json:"rx_bytes"`
+	TxBytes uint64  `json:"tx_bytes"`
+	RxBps   float64 `json:"rx_bps"`
+	TxBps   float64 `json:"tx_bps"`
+}
+
+// Metrics is the complete metric set for one report.
+type Metrics struct {
+	Os      OsInfo        `json:"os"`
+	Cpu     CPUInfo       `json:"cpu"`
+	Mem     MemInfo       `json:"mem"`
+	Disk    DiskIOInfo    `json:"disk"`
+	Network NetworkIOInfo `json:"network"`
+}
+
+// Report is the complete JSON structure for one push or pull report.
 type Report struct {
 	AgentVersion string  `json:"agent_version"`
 	Hostname     string  `json:"hostname"`

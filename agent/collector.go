@@ -1,9 +1,10 @@
-// Package main: collector.go — 采集基础 / CPU / 内存指标。
+// Package main: collector.go — collect system, CPU, memory and I/O metrics.
 //
-// 采集项（精简版）：
-//   - 基础：os, kernel_version, arch, uptime
-//   - CPU：load_avg(1/5/15min), usage_percent
-//   - 内存：total/used/available/used_pct, swap_total/swap_used
+// Collected values include:
+//   - system: OS, kernel, architecture, uptime and IP addresses
+//   - CPU: load averages and usage percentage
+//   - memory: total, used, available and swap
+//   - disk and network counters plus rates calculated between samples
 package main
 
 import (
@@ -11,12 +12,15 @@ import (
 	"net"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/load"
 	"github.com/shirou/gopsutil/v3/mem"
+	gopsutilnet "github.com/shirou/gopsutil/v3/net"
 
 	pkgmetrics "github.com/statuspigeon/metrics"
 )
@@ -24,12 +28,24 @@ import (
 // AgentVersion 编译期注入（见 Makefile -ldflags）。
 var AgentVersion = "dev"
 
-// Collector 负责采集。
+// Collector collects metrics. I/O counters are retained between samples so
+// the report can include bytes-per-second values without adding a second
+// blocking sampling interval.
 type Collector struct {
 	hostname string
+	ioMu     sync.Mutex
+	previous *ioSnapshot
 }
 
-// NewCollector 创建采集器。hostname 为空时取系统主机名。
+type ioSnapshot struct {
+	at        time.Time
+	diskRead  uint64
+	diskWrite uint64
+	netRx     uint64
+	netTx     uint64
+}
+
+// NewCollector creates a collector. An empty hostname uses the system name.
 func NewCollector(hostname string) (*Collector, error) {
 	if hostname == "" {
 		info, err := host.Info()
@@ -41,10 +57,10 @@ func NewCollector(hostname string) (*Collector, error) {
 	return &Collector{hostname: hostname}, nil
 }
 
-// Hostname 返回采集器绑定的主机名。
+// Hostname returns the collector hostname.
 func (c *Collector) Hostname() string { return c.hostname }
 
-// Collect 采集一次完整指标并组装成 Report。
+// Collect gathers one complete report.
 func (c *Collector) Collect() (*pkgmetrics.Report, error) {
 	report := &pkgmetrics.Report{
 		AgentVersion: AgentVersion,
@@ -60,6 +76,7 @@ func (c *Collector) Collect() (*pkgmetrics.Report, error) {
 	if err := collectMem(&report.Metrics.Mem); err != nil {
 		return nil, err
 	}
+	c.collectIO(&report.Metrics.Disk, &report.Metrics.Network)
 	return report, nil
 }
 
@@ -81,9 +98,7 @@ func collectOs(out *pkgmetrics.OsInfo) error {
 	return nil
 }
 
-// localIPs 返回本机非回环、非 link-local 的 IPv4 与 IPv6 地址（各一组）。
-// 用 net 标准库，跨平台（Linux/OpenWrt/macOS/Windows 通用）。
-// 获取不到时对应分组为空切片。
+// localIPs returns non-loopback, non-link-local IPv4 and IPv6 addresses.
 func localIPs() (ipv4, ipv6 []string) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -139,4 +154,43 @@ func collectMem(out *pkgmetrics.MemInfo) error {
 		out.SwapUsed = sm.Used
 	}
 	return nil
+}
+
+func (c *Collector) collectIO(diskOut *pkgmetrics.DiskIOInfo, networkOut *pkgmetrics.NetworkIOInfo) {
+	snapshot := ioSnapshot{at: time.Now()}
+	if counters, err := disk.IOCounters(); err == nil {
+		for _, counter := range counters {
+			snapshot.diskRead += counter.ReadBytes
+			snapshot.diskWrite += counter.WriteBytes
+		}
+	}
+	if counters, err := gopsutilnet.IOCounters(false); err == nil && len(counters) > 0 {
+		snapshot.netRx = counters[0].BytesRecv
+		snapshot.netTx = counters[0].BytesSent
+	}
+
+	diskOut.ReadBytes = snapshot.diskRead
+	diskOut.WriteBytes = snapshot.diskWrite
+	networkOut.RxBytes = snapshot.netRx
+	networkOut.TxBytes = snapshot.netTx
+
+	c.ioMu.Lock()
+	if c.previous != nil {
+		seconds := snapshot.at.Sub(c.previous.at).Seconds()
+		if seconds > 0 {
+			diskOut.ReadBps = counterRate(snapshot.diskRead, c.previous.diskRead, seconds)
+			diskOut.WriteBps = counterRate(snapshot.diskWrite, c.previous.diskWrite, seconds)
+			networkOut.RxBps = counterRate(snapshot.netRx, c.previous.netRx, seconds)
+			networkOut.TxBps = counterRate(snapshot.netTx, c.previous.netTx, seconds)
+		}
+	}
+	c.previous = &snapshot
+	c.ioMu.Unlock()
+}
+
+func counterRate(current, previous uint64, seconds float64) float64 {
+	if current <= previous || seconds <= 0 {
+		return 0
+	}
+	return float64(current-previous) / seconds
 }

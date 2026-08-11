@@ -2,10 +2,16 @@
   "luci-app-statuspigeon": {
     "description": "Status Pigeon agent configuration",
     "read": {
-      "uci": [ "statuspigeon" ]
+      "uci": [ "statuspigeon" ],
+      "file": {
+        "/usr/bin/statuspigeon-status": [ "exec" ]
+      }
     },
     "write": {
-      "uci": [ "statuspigeon" ]
+      "uci": [ "statuspigeon" ],
+      "file": {
+        "/usr/bin/statuspigeon-report": [ "exec" ]
+      }
     }
   }
 }

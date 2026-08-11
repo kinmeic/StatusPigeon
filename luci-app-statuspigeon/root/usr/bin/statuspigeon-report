@@ -6,6 +6,9 @@
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 umask 077
 reason="${1:-timer}"
+timestamp="$(date +%s)"
+state_dir=/var/run/statuspigeon
+state_file="$state_dir/last-report"
 
 get_uci() {
 	uci -q get "$1" 2>/dev/null || true
@@ -15,29 +18,62 @@ log_msg() {
 	logger -t statuspigeon -- "$1" 2>/dev/null || echo "statuspigeon: $1" >&2
 }
 
+state_get() {
+	[ -r "$state_file" ] || return 0
+	sed -n "s/^$1=//p" "$state_file" 2>/dev/null | head -n1
+}
+
+state_write() {
+	status="$1"
+	attempt="$2"
+	success="$3"
+	state_reason="$4"
+	http_code="$5"
+	message="$(printf '%s' "$6" | tr '\r\n' '  ' | cut -c 1-160)"
+	mkdir -p "$state_dir" 2>/dev/null || return 0
+	temporary="$state_dir/.last-report.$$"
+	{
+		printf 'status=%s\n' "$status"
+		printf 'last_attempt=%s\n' "$attempt"
+		printf 'last_success=%s\n' "$success"
+		printf 'reason=%s\n' "$state_reason"
+		printf 'http_code=%s\n' "$http_code"
+		printf 'message=%s\n' "$message"
+	} > "$temporary" && mv "$temporary" "$state_file"
+	rm -f "$temporary"
+}
+
+report_failure() {
+	previous_success="$(state_get last_success)"
+	state_write failure "$timestamp" "${previous_success:-0}" "$reason" "${2:-0}" "$1"
+	log_msg "$1"
+	exit 1
+}
+
 enabled="$(get_uci statuspigeon.main.enabled)"
-[ "$enabled" = "1" ] || exit 0
+[ "$enabled" = "1" ] || [ "$reason" = "manual" ] || exit 0
 
 endpoint="$(get_uci statuspigeon.main.endpoint)"
 api_key="$(get_uci statuspigeon.main.api_key)"
 timeout="$(get_uci statuspigeon.main.timeout)"
 hostname="$(get_uci statuspigeon.main.hostname)"
 
-[ -n "$endpoint" ] || { log_msg "endpoint is empty"; exit 1; }
-[ -n "$api_key" ] || { log_msg "api_key is empty"; exit 1; }
+[ -n "$endpoint" ] || report_failure "endpoint is empty"
+[ -n "$api_key" ] || report_failure "api_key is empty"
 case "$endpoint" in
 	http://*|https://*) ;;
-	*) log_msg "endpoint must start with http:// or https://"; exit 1 ;;
+	*) report_failure "endpoint must start with http:// or https://" ;;
 esac
 
-# Accept either a full report path or a hub base URL. This also makes the
-# default usable with the PHP layout where /report/index.php is a real file.
+# Accept either a full report path or a hub base URL. A directory URL ending
+# in /report/ works through the virtual host's normal DirectoryIndex behavior;
+# /report/index.php remains supported for hosts without DirectoryIndex.
 case "$endpoint" in
 	*/report/index.php) ;;
-	*/report) endpoint="${endpoint}/index.php" ;;
-	*/report/) endpoint="${endpoint}index.php" ;;
-	*/) endpoint="${endpoint}report/index.php" ;;
-	*) endpoint="${endpoint}/report/index.php" ;;
+	*/report) endpoint="${endpoint}/" ;;
+	*/report/) ;;
+	*/) endpoint="${endpoint}report/" ;;
+	*) endpoint="${endpoint}/report/" ;;
 esac
 
 case "$timeout" in
@@ -62,7 +98,6 @@ trap 'rm -rf /var/run/statuspigeon-report.lock' EXIT HUP INT TERM
 hostname="${hostname:-$(cat /proc/sys/kernel/hostname 2>/dev/null || uname -n)}"
 agent_version="$(get_uci statuspigeon.main.agent_version)"
 agent_version="${agent_version:-luci-app-statuspigeon/1.0}"
-timestamp="$(date +%s)"
 uptime="$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)"
 kernel="$(uname -r 2>/dev/null || echo unknown)"
 arch="$(uname -m 2>/dev/null || echo unknown)"
@@ -72,6 +107,23 @@ if [ -r /etc/openwrt_release ]; then
 	os_from_file="$(sed -n 's/^DISTRIB_ID=//p' /etc/openwrt_release 2>/dev/null | head -n1 | tr -d "'")"
 	[ -n "$os_from_file" ] && os_name="$os_from_file"
 fi
+
+# Read cumulative counters from procfs. Rates are calculated over the same
+# one-second interval used for the CPU sample.
+disk_io_snapshot() {
+	awk '$3 !~ /^(loop|ram|fd|sr|dm-|md|zram)/ {read += $6 * 512; write += $10 * 512} END {printf "%.0f %.0f\n", read + 0, write + 0}' /proc/diskstats 2>/dev/null || echo "0 0"
+}
+
+network_io_snapshot() {
+	awk -F: '$1 !~ /^[[:space:]]*lo[[:space:]]*$/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); split($2, fields, /[[:space:]]+/); rx += fields[1]; tx += fields[9]} END {printf "%.0f %.0f\n", rx + 0, tx + 0}' /proc/net/dev 2>/dev/null || echo "0 0"
+}
+
+disk_before="$(disk_io_snapshot)"
+network_before="$(network_io_snapshot)"
+disk_read_before="$(printf '%s' "$disk_before" | awk '{print $1}')"
+disk_write_before="$(printf '%s' "$disk_before" | awk '{print $2}')"
+network_rx_before="$(printf '%s' "$network_before" | awk '{print $1}')"
+network_tx_before="$(printf '%s' "$network_before" | awk '{print $2}')"
 
 # Read two /proc/stat snapshots to obtain a portable aggregate CPU percentage.
 cpu_snapshot() {
@@ -85,6 +137,17 @@ u1="${1:-0}"; n1="${2:-0}"; s1="${3:-0}"; i1="${4:-0}"; w1="${5:-0}"; q1="${6:-0
 set -- $cpu_2
 u2="${1:-0}"; n2="${2:-0}"; s2="${3:-0}"; i2="${4:-0}"; w2="${5:-0}"; q2="${6:-0}"; r2="${7:-0}"; t2="${8:-0}"
 cpu_usage="$(awk -v u1="$u1" -v n1="$n1" -v s1="$s1" -v i1="$i1" -v w1="$w1" -v q1="$q1" -v r1="$r1" -v t1="$t1" -v u2="$u2" -v n2="$n2" -v s2="$s2" -v i2="$i2" -v w2="$w2" -v q2="$q2" -v r2="$r2" -v t2="$t2" 'BEGIN { a=u2+n2+s2+i2+w2+q2+r2+t2-(u1+n1+s1+i1+w1+q1+r1+t1); b=(i2+w2)-(i1+w1); if (a <= 0) printf "0.00"; else printf "%.2f", (a-b)*100/a }')"
+
+disk_after="$(disk_io_snapshot)"
+network_after="$(network_io_snapshot)"
+disk_read_bytes="$(printf '%s' "$disk_after" | awk '{print $1}')"
+disk_write_bytes="$(printf '%s' "$disk_after" | awk '{print $2}')"
+network_rx_bytes="$(printf '%s' "$network_after" | awk '{print $1}')"
+network_tx_bytes="$(printf '%s' "$network_after" | awk '{print $2}')"
+disk_read_bps="$(awk -v before="${disk_read_before:-0}" -v after="${disk_read_bytes:-0}" 'BEGIN { d=after-before; if (d < 0) d=0; printf "%.2f", d }')"
+disk_write_bps="$(awk -v before="${disk_write_before:-0}" -v after="${disk_write_bytes:-0}" 'BEGIN { d=after-before; if (d < 0) d=0; printf "%.2f", d }')"
+network_rx_bps="$(awk -v before="${network_rx_before:-0}" -v after="${network_rx_bytes:-0}" 'BEGIN { d=after-before; if (d < 0) d=0; printf "%.2f", d }')"
+network_tx_bps="$(awk -v before="${network_tx_before:-0}" -v after="${network_tx_bytes:-0}" 'BEGIN { d=after-before; if (d < 0) d=0; printf "%.2f", d }')"
 
 set -- $(awk '/^MemTotal:/{total=$2*1024} /^MemAvailable:/{available=$2*1024} /^MemFree:/{free=$2*1024} /^Buffers:/{buffers=$2*1024} /^Cached:/{cached=$2*1024} /^SwapTotal:/{swap_total=$2*1024} /^SwapFree:/{swap_free=$2*1024} END { if (available == 0) available=free+buffers+cached; used=total-available; if (used < 0) used=0; if (total > 0) pct=used*100/total; else pct=0; swap_used=swap_total-swap_free; if (swap_used < 0) swap_used=0; printf "%d %d %d %.2f %d %d", total, used, available, pct, swap_total, swap_used }' /proc/meminfo)
 mem_total="${1:-0}"; mem_used="${2:-0}"; mem_available="${3:-0}"; mem_used_pct="${4:-0}"; swap_total="${5:-0}"; swap_used="${6:-0}"
@@ -147,18 +210,36 @@ json_add_object 'metrics'
 	json_add_int 'swap_total' "$swap_total"
 	json_add_int 'swap_used' "$swap_used"
 	json_close_object
+	json_add_object 'disk'
+	json_add_int 'read_bytes' "${disk_read_bytes:-0}"
+	json_add_int 'write_bytes' "${disk_write_bytes:-0}"
+	json_add_number 'read_bps' "$disk_read_bps"
+	json_add_number 'write_bps' "$disk_write_bps"
+	json_close_object
+	json_add_object 'network'
+	json_add_int 'rx_bytes' "${network_rx_bytes:-0}"
+	json_add_int 'tx_bytes' "${network_tx_bytes:-0}"
+	json_add_number 'rx_bps' "$network_rx_bps"
+	json_add_number 'tx_bps' "$network_tx_bps"
+	json_close_object
 json_close_object
 payload="$(json_dump)"
 
-response="$(curl --silent --show-error --fail --connect-timeout "$timeout" --max-time "$timeout" \
+previous_success="$(state_get last_success)"
+curl_error_file="/tmp/statuspigeon-curl-error.$$"
+http_code="$(curl --silent --show-error --fail --connect-timeout "$timeout" --max-time "$timeout" \
 	-H 'Content-Type: application/json' \
 	-H "Authorization: Bearer $api_key" \
 	-H "X-API-Key: $api_key" \
-	--data-binary "$payload" "$endpoint" 2>&1)"
+	--data-binary "$payload" --output /dev/null --write-out '%{http_code}' "$endpoint" 2>"$curl_error_file")"
 result=$?
+response="$(tr '\r\n' '  ' < "$curl_error_file" 2>/dev/null | cut -c 1-160)"
+rm -f "$curl_error_file"
 if [ "$result" -ne 0 ]; then
-	log_msg "push failed ($result): $response"
+	state_write failure "$timestamp" "${previous_success:-0}" "$reason" "${http_code:-0}" "${response:-HTTP request failed}"
+	log_msg "push failed ($result): ${response:-HTTP request failed}"
 	exit "$result"
 fi
+state_write success "$timestamp" "$timestamp" "$reason" "${http_code:-0}" "HTTP ${http_code:-0}"
 log_msg "push ok ($reason)"
 exit 0

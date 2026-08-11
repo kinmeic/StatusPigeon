@@ -20,7 +20,7 @@ return array(
 
     'timezone' => 'UTC',
     'retention_days' => 90,
-    'uptime_bar_days' => 90,
+    'uptime_bar_days' => 60,
     'degraded_cpu' => 90.0,
     'degraded_mem' => 95.0,
     'report_interval' => 300,

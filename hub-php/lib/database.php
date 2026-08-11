@@ -51,6 +51,10 @@ function statuspigeon_db($config)
             cpu_usage REAL,
             mem_usage REAL,
             load1 REAL,
+            disk_read_bps REAL,
+            disk_write_bps REAL,
+            network_rx_bps REAL,
+            network_tx_bps REAL,
             payload TEXT NOT NULL,
             FOREIGN KEY(host_id) REFERENCES hosts(id)
         )',
@@ -71,7 +75,23 @@ function statuspigeon_db($config)
     foreach ($schema as $statement) {
         $pdo->exec($statement);
     }
+    // Add the I/O columns to databases created by earlier versions.
+    statuspigeon_ensure_column($pdo, 'metrics_raw', 'disk_read_bps', 'REAL');
+    statuspigeon_ensure_column($pdo, 'metrics_raw', 'disk_write_bps', 'REAL');
+    statuspigeon_ensure_column($pdo, 'metrics_raw', 'network_rx_bps', 'REAL');
+    statuspigeon_ensure_column($pdo, 'metrics_raw', 'network_tx_bps', 'REAL');
     return $pdo;
+}
+
+function statuspigeon_ensure_column($pdo, $table, $column, $definition)
+{
+    $columns = $pdo->query('PRAGMA table_info(' . $table . ')')->fetchAll();
+    foreach ($columns as $item) {
+        if (isset($item['name']) && $item['name'] === $column) {
+            return;
+        }
+    }
+    $pdo->exec('ALTER TABLE ' . $table . ' ADD COLUMN ' . $column . ' ' . $definition);
 }
 
 function statuspigeon_metric_number($value, $default)
@@ -124,6 +144,10 @@ function statuspigeon_normalize_report($input)
         ? $rawMetrics['cpu'] : array();
     $rawMem = isset($rawMetrics['mem']) && is_array($rawMetrics['mem'])
         ? $rawMetrics['mem'] : array();
+    $rawDisk = isset($rawMetrics['disk']) && is_array($rawMetrics['disk'])
+        ? $rawMetrics['disk'] : array();
+    $rawNetwork = isset($rawMetrics['network']) && is_array($rawMetrics['network'])
+        ? $rawMetrics['network'] : array();
 
     return array(
         'agent_version' => statuspigeon_string(isset($input['agent_version']) ? $input['agent_version'] : '', ''),
@@ -151,6 +175,18 @@ function statuspigeon_normalize_report($input)
                 'used_pct' => statuspigeon_metric_number(isset($rawMem['used_pct']) ? $rawMem['used_pct'] : 0, 0),
                 'swap_total' => statuspigeon_metric_int(isset($rawMem['swap_total']) ? $rawMem['swap_total'] : 0, 0),
                 'swap_used' => statuspigeon_metric_int(isset($rawMem['swap_used']) ? $rawMem['swap_used'] : 0, 0),
+            ),
+            'disk' => array(
+                'read_bytes' => statuspigeon_metric_int(isset($rawDisk['read_bytes']) ? $rawDisk['read_bytes'] : 0, 0),
+                'write_bytes' => statuspigeon_metric_int(isset($rawDisk['write_bytes']) ? $rawDisk['write_bytes'] : 0, 0),
+                'read_bps' => isset($rawDisk['read_bps']) ? statuspigeon_metric_number($rawDisk['read_bps'], 0) : null,
+                'write_bps' => isset($rawDisk['write_bps']) ? statuspigeon_metric_number($rawDisk['write_bps'], 0) : null,
+            ),
+            'network' => array(
+                'rx_bytes' => statuspigeon_metric_int(isset($rawNetwork['rx_bytes']) ? $rawNetwork['rx_bytes'] : 0, 0),
+                'tx_bytes' => statuspigeon_metric_int(isset($rawNetwork['tx_bytes']) ? $rawNetwork['tx_bytes'] : 0, 0),
+                'rx_bps' => isset($rawNetwork['rx_bps']) ? statuspigeon_metric_number($rawNetwork['rx_bps'], 0) : null,
+                'tx_bps' => isset($rawNetwork['tx_bps']) ? statuspigeon_metric_number($rawNetwork['tx_bps'], 0) : null,
             ),
         ),
     );
@@ -247,8 +283,11 @@ function statuspigeon_ingest($pdo, $report, $config)
         ));
 
         $insertMetric = $pdo->prepare(
-            'INSERT INTO metrics_raw (host_id, ts, cpu_usage, mem_usage, load1, payload)
-             VALUES (:host_id, :ts, :cpu, :mem, :load1, :payload)'
+            'INSERT INTO metrics_raw
+             (host_id, ts, cpu_usage, mem_usage, load1, disk_read_bps,
+              disk_write_bps, network_rx_bps, network_tx_bps, payload)
+             VALUES (:host_id, :ts, :cpu, :mem, :load1, :disk_read_bps,
+                     :disk_write_bps, :network_rx_bps, :network_tx_bps, :payload)'
         );
         $insertMetric->execute(array(
             ':host_id' => $hostId,
@@ -256,6 +295,10 @@ function statuspigeon_ingest($pdo, $report, $config)
             ':cpu' => $metrics['cpu']['usage'],
             ':mem' => $metrics['mem']['used_pct'],
             ':load1' => $metrics['cpu']['load1'],
+            ':disk_read_bps' => $metrics['disk']['read_bps'],
+            ':disk_write_bps' => $metrics['disk']['write_bps'],
+            ':network_rx_bps' => $metrics['network']['rx_bps'],
+            ':network_tx_bps' => $metrics['network']['tx_bps'],
             ':payload' => $payload,
         ));
 
@@ -457,7 +500,9 @@ function statuspigeon_daily($pdo, $hostId, $days)
 function statuspigeon_metrics_series($pdo, $hostId, $fromTs)
 {
     $stmt = $pdo->prepare(
-        'SELECT ts, cpu_usage, mem_usage, load1 FROM metrics_raw
+        'SELECT ts, cpu_usage, mem_usage, load1, disk_read_bps, disk_write_bps,
+                network_rx_bps, network_tx_bps
+         FROM metrics_raw
          WHERE host_id=:host_id AND ts >= :from_ts ORDER BY ts ASC LIMIT 10000'
     );
     $stmt->execute(array(':host_id' => (int) $hostId, ':from_ts' => (int) $fromTs));
@@ -468,6 +513,10 @@ function statuspigeon_metrics_series($pdo, $hostId, $fromTs)
             'cpu' => $row['cpu_usage'] === null ? null : (float) $row['cpu_usage'],
             'mem' => $row['mem_usage'] === null ? null : (float) $row['mem_usage'],
             'load1' => $row['load1'] === null ? null : (float) $row['load1'],
+            'disk_read_bps' => $row['disk_read_bps'] === null ? null : (float) $row['disk_read_bps'],
+            'disk_write_bps' => $row['disk_write_bps'] === null ? null : (float) $row['disk_write_bps'],
+            'network_rx_bps' => $row['network_rx_bps'] === null ? null : (float) $row['network_rx_bps'],
+            'network_tx_bps' => $row['network_tx_bps'] === null ? null : (float) $row['network_tx_bps'],
         );
     }
     return $out;

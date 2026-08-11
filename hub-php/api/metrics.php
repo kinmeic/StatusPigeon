@@ -1,5 +1,7 @@
 <?php
 require_once dirname(__DIR__) . '/lib/bootstrap.php';
+require_once dirname(__DIR__) . '/lib/auth.php';
+statuspigeon_admin_require_api();
 statuspigeon_require_get();
 
 $id = isset($_GET['id']) && is_numeric($_GET['id']) ? (int) $_GET['id'] : 0;

@@ -1,6 +1,6 @@
 config statuspigeon 'main'
 	option enabled '0'
-	option endpoint 'https://example.com/report/index.php'
+	option endpoint 'https://example.com/report/'
 	option api_key ''
 	option hostname ''
 	option interval '300'

@@ -1,0 +1,35 @@
+#!/bin/sh
+# Print the last reporter result as JSON for the LuCI status view.
+
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+state_file=/var/run/statuspigeon/last-report
+
+state_get() {
+	[ -r "$state_file" ] || return 0
+	sed -n "s/^$1=//p" "$state_file" | head -n1
+}
+
+as_int() {
+	case "$1" in
+		''|*[!0-9]*) echo 0 ;;
+		*) echo "$1" ;;
+	esac
+}
+
+status="$(state_get status)"
+[ -n "$status" ] || status=never
+last_attempt="$(as_int "$(state_get last_attempt)")"
+last_success="$(as_int "$(state_get last_success)")"
+http_code="$(as_int "$(state_get http_code)")"
+reason="$(state_get reason)"
+message="$(state_get message)"
+
+. /usr/share/libubox/jshn.sh
+json_init
+json_add_string status "$status"
+json_add_int last_attempt "$last_attempt"
+json_add_int last_success "$last_success"
+json_add_string reason "$reason"
+json_add_int http_code "$http_code"
+json_add_string message "$message"
+json_dump
