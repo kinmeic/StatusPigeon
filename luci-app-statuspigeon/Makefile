@@ -5,7 +5,6 @@ PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=Status Pigeon contributors
-PKGARCH:=all
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -14,6 +13,7 @@ define Package/luci-app-statuspigeon
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
   TITLE:=Status Pigeon JSON reporting agent
+  PKGARCH:=all
   DEPENDS:=+luci-base +curl +ca-bundle +jshn
 endef
 
