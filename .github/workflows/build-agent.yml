@@ -1,0 +1,78 @@
+name: Build statuspigeon agent
+
+on:
+  # Future version tags build and publish automatically.
+  push:
+    tags:
+      - 'v*'
+  # Manual runs attach the binaries to an existing release, e.g. v1.0.9.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '目标 release 的 tag（release 不存在时会基于该 git tag 创建）'
+        required: true
+        default: 'v1.0.9'
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: agent ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - linux-amd64
+          - linux-arm64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+
+      - name: Build agent
+        run: make -C agent ${{ matrix.target }}
+
+      - name: Package archive
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          stage="$RUNNER_TEMP/package/statuspigeon-agent"
+          mkdir -p "$stage"
+          cp "agent/dist/statuspigeon-agent-$TARGET" "$stage/statuspigeon-agent"
+          cp agent/config.example.yaml "$stage/"
+          mkdir -p artifacts
+          tar -czf "artifacts/statuspigeon-agent-$TARGET.tar.gz" -C "$RUNNER_TEMP/package" statuspigeon-agent
+          cd artifacts
+          sha256sum "statuspigeon-agent-$TARGET.tar.gz" > "statuspigeon-agent-$TARGET.tar.gz.sha256"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: statuspigeon-agent-${{ matrix.target }}
+          path: artifacts/
+          if-no-files-found: error
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -eu
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "StatusPigeon $TAG" --generate-notes
+          fi
+          gh release upload "$TAG" artifacts/* --clobber
