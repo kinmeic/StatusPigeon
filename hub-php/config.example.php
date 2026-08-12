@@ -36,4 +36,14 @@ return array(
     'report_interval' => 300,
     'offline_periods' => 3,
     'max_report_bytes' => 1048576,
+
+    // Admin login protection. Five failures from one source within 15 minutes
+    // trigger a 15-minute temporary lock; failed attempts also get a capped
+    // exponential delay. The security log is retained for 90 days.
+    'login_max_failures' => 5,
+    'login_window_seconds' => 900,
+    'login_lockout_seconds' => 900,
+    'login_delay_base_ms' => 250,
+    'login_delay_max_ms' => 8000,
+    'login_audit_retention_days' => 90,
 );

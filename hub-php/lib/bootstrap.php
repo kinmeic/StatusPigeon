@@ -29,6 +29,14 @@ $config = array(
     'report_interval' => 300,
     'offline_periods' => 3,
     'max_report_bytes' => 1048576,
+    // Admin login protection: five failures in 15 minutes trigger a 15-minute
+    // per-source lockout. Failed attempts also use capped exponential delay.
+    'login_max_failures' => 5,
+    'login_window_seconds' => 900,
+    'login_lockout_seconds' => 900,
+    'login_delay_base_ms' => 250,
+    'login_delay_max_ms' => 8000,
+    'login_audit_retention_days' => 90,
 );
 
 $configFile = dirname(__DIR__) . '/config.php';

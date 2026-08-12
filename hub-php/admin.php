@@ -111,13 +111,68 @@ $returnUrl = statuspigeon_admin_return_url($returnCandidate);
 $adminLocation = 'admin.php' . ($returnUrl === 'admin.php' ? '' : '?return=' . rawurlencode($returnUrl));
 
 if ($action === 'login') {
-    if (!statuspigeon_admin_csrf_ok()) {
-        statuspigeon_admin_redirect('登录页面已过期，请重试', true, $adminLocation);
-    }
     $credential = isset($_POST['credential']) ? $_POST['credential'] : '';
-    if (!statuspigeon_admin_credential_ok($credential, $config)) {
-        statuspigeon_admin_redirect('凭据不正确', true, $adminLocation);
+    $directIp = statuspigeon_admin_direct_ip();
+    $auditIp = statuspigeon_admin_audit_ip();
+    $now = time();
+    $rate = statuspigeon_admin_login_rate_status($pdo, $directIp, $now, $config);
+    if ($rate['limited']) {
+        // Do not append an audit row for every request during a lockout; that
+        // would let an attacker turn the security log into a storage sink.
+        session_write_close();
+        statuspigeon_admin_rate_limited_response($rate['retry_after'], $returnUrl);
     }
+
+    if (!statuspigeon_admin_csrf_ok()) {
+        $failure = statuspigeon_admin_login_record_failure($pdo, $directIp, $now, $config);
+        statuspigeon_admin_login_audit(
+            $pdo,
+            $auditIp,
+            $failure['locked'] ? 'locked' : 'csrf',
+            $failure['failed_count'],
+            $failure['retry_after']
+        );
+        if ($failure['locked']) {
+            session_write_close();
+            statuspigeon_admin_login_sleep($failure['delay_ms']);
+            statuspigeon_admin_rate_limited_response($failure['retry_after'], $returnUrl);
+        }
+        $_SESSION['statuspigeon_flash'] = array(
+            'message' => '登录页面已过期，请刷新后重试',
+            'error' => true,
+        );
+        session_write_close();
+        statuspigeon_admin_login_sleep($failure['delay_ms']);
+        header('Location: ' . $adminLocation);
+        exit;
+    }
+
+    if (!statuspigeon_admin_credential_ok($credential, $config)) {
+        $failure = statuspigeon_admin_login_record_failure($pdo, $directIp, $now, $config);
+        statuspigeon_admin_login_audit(
+            $pdo,
+            $auditIp,
+            $failure['locked'] ? 'locked' : 'failure',
+            $failure['failed_count'],
+            $failure['retry_after']
+        );
+        if ($failure['locked']) {
+            session_write_close();
+            statuspigeon_admin_login_sleep($failure['delay_ms']);
+            statuspigeon_admin_rate_limited_response($failure['retry_after'], $returnUrl);
+        }
+        $_SESSION['statuspigeon_flash'] = array(
+            'message' => '凭据不正确',
+            'error' => true,
+        );
+        session_write_close();
+        statuspigeon_admin_login_sleep($failure['delay_ms']);
+        header('Location: ' . $adminLocation);
+        exit;
+    }
+
+    statuspigeon_admin_login_reset($pdo, $directIp);
+    statuspigeon_admin_login_audit($pdo, $auditIp, 'success', 0, 0);
     session_regenerate_id(true);
     $_SESSION['statuspigeon_admin_logged_in'] = true;
     statuspigeon_admin_redirect('登录成功', false, $returnUrl);
@@ -229,6 +284,10 @@ $logPage = isset($_GET['page']) ? (int) $_GET['page'] : 1;
 $logPage = max(1, $logPage);
 $logTotal = 0;
 $logPageCount = 1;
+$loginAudit = array();
+$loginAuditError = '';
+$loginAuditTotal = 0;
+$loginAuditLimit = 50;
 if ($loggedIn && $section === 'logs') {
     try {
         $logTotal = statuspigeon_reports_count($pdo);
@@ -240,6 +299,13 @@ if ($loggedIn && $section === 'logs') {
     } catch (Exception $e) {
         $logError = '日志查询失败';
         error_log('Status Pigeon log query failed: ' . $e->getMessage());
+    }
+    try {
+        $loginAuditTotal = statuspigeon_admin_login_audit_count($pdo);
+        $loginAudit = statuspigeon_admin_recent_login_audit($pdo, $loginAuditLimit);
+    } catch (Exception $e) {
+        $loginAuditError = '登录安全日志查询失败';
+        error_log('Status Pigeon login audit query failed: ' . $e->getMessage());
     }
 }
 $devices = array();
@@ -421,6 +487,57 @@ if ($loggedIn && $section === 'devices') {
                     <?php endif; ?>
                   </nav>
                 <?php endif; ?>
+              <?php endif; ?>
+            </section>
+            <section class="admin-card">
+              <h2>登录安全审计</h2>
+              <p class="host-meta">共 <?php echo (int) $loginAuditTotal; ?> 条登录事件，显示最近 <?php echo (int) $loginAuditLimit; ?> 条。不会记录提交的 API key 或管理密码。</p>
+              <?php if ($loginAuditError !== ''): ?>
+                <div class="admin-message admin-error"><?php echo statuspigeon_admin_escape($loginAuditError); ?></div>
+              <?php elseif (!$loginAudit): ?>
+                <p class="empty">暂无登录事件。</p>
+              <?php else: ?>
+                <div class="log-table-wrap">
+                  <table class="log-table">
+                    <thead>
+                      <tr><th>时间</th><th>来源 IP</th><th>结果</th><th>失败次数</th><th>重试等待</th><th>User-Agent</th></tr>
+                    </thead>
+                    <tbody>
+                      <?php foreach ($loginAudit as $event): ?>
+                        <?php
+                        $eventOutcome = (string) $event['outcome'];
+                        $eventLabels = array(
+                            'success' => '登录成功',
+                            'failure' => '登录失败',
+                            'locked' => '触发临时锁定',
+                            'blocked' => '锁定中拦截',
+                            'csrf' => 'CSRF 校验失败',
+                        );
+                        $eventClasses = array(
+                            'success' => 'operational',
+                            'failure' => 'down',
+                            'locked' => 'down',
+                            'blocked' => 'degraded',
+                            'csrf' => 'degraded',
+                        );
+                        $eventLabel = isset($eventLabels[$eventOutcome]) ? $eventLabels[$eventOutcome] : '未知事件';
+                        $eventClass = isset($eventClasses[$eventOutcome]) ? $eventClasses[$eventOutcome] : 'no-data';
+                        $eventUserAgent = (string) $event['user_agent'];
+                        $eventUserAgentShort = strlen($eventUserAgent) > 48
+                            ? substr($eventUserAgent, 0, 45) . '…' : $eventUserAgent;
+                        ?>
+                        <tr>
+                          <td class="log-time" data-timestamp="<?php echo (int) $event['ts']; ?>"><?php echo statuspigeon_admin_escape(date('Y-m-d H:i:s', (int) $event['ts'])); ?></td>
+                          <td><?php echo statuspigeon_admin_escape($event['ip']); ?></td>
+                          <td><span class="badge badge-<?php echo statuspigeon_admin_escape($eventClass); ?>"><?php echo statuspigeon_admin_escape($eventLabel); ?></span></td>
+                          <td><?php echo (int) $event['failed_count']; ?></td>
+                          <td><?php echo (int) $event['retry_after']; ?> 秒</td>
+                          <td title="<?php echo statuspigeon_admin_escape($eventUserAgent); ?>"><?php echo statuspigeon_admin_escape($eventUserAgentShort); ?></td>
+                        </tr>
+                      <?php endforeach; ?>
+                    </tbody>
+                  </table>
+                </div>
               <?php endif; ?>
             </section>
           <?php elseif ($section === 'devices'): ?>

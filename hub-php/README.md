@@ -11,6 +11,8 @@
 
 管理页面为 `/admin.php`。首次登录使用当前 `api_key`，进入后可以管理 API key、查询最近接收日志，并设置独立的管理密码。新配置写入同目录的 `config.local.php`，因此 PHP-FPM 用户必须对网站目录有写权限；如果虚拟主机禁止 PHP 写文件，请手动维护 `config.php`。如需让管理页显示固定的完整接收地址，可在 `config.php` 设置 `public_base_url`，例如 `https://example.com/statuspigeon`。
 
+管理登录默认启用防暴力破解保护：同一直接连接来源在 15 分钟内连续 5 次凭据错误后临时锁定 15 分钟；每次失败会按 250ms、500ms、1s、2s…递增延迟，达到锁定阈值时返回 HTTP `429` 和 `Retry-After`。登录成功后会清除该来源的失败状态。失败、触发锁定、CSRF 校验失败和成功登录都会写入 SQLite 的安全审计日志，可在管理页的“日志查询”中查看；锁定期间不会为每一次重复请求追加日志，避免攻击者利用日志写入制造存储压力。日志默认保留 90 天。可在 `config.php` 调整 `login_max_failures`、`login_window_seconds`、`login_lockout_seconds`、`login_delay_base_ms`、`login_delay_max_ms` 和 `login_audit_retention_days`。限速使用服务器看到的 `REMOTE_ADDR`，不会信任客户端提交的 `X-Forwarded-For` 来绕过限制。
+
 接收地址为：
 
 ```text

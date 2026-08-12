@@ -72,6 +72,28 @@ function statuspigeon_db($config)
             FOREIGN KEY(host_id) REFERENCES hosts(id)
         )',
         'CREATE INDEX IF NOT EXISTS idx_daily_host_date ON uptime_daily(host_id, date)',
+        'CREATE TABLE IF NOT EXISTS admin_login_rate_limits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_hash TEXT UNIQUE NOT NULL,
+            ip TEXT NOT NULL,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            window_started_at INTEGER NOT NULL DEFAULT 0,
+            last_failed_at INTEGER NOT NULL DEFAULT 0,
+            locked_until INTEGER NOT NULL DEFAULT 0
+        )',
+        'CREATE INDEX IF NOT EXISTS idx_admin_login_rate_cleanup
+            ON admin_login_rate_limits(locked_until, last_failed_at)',
+        'CREATE TABLE IF NOT EXISTS admin_login_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            ip TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            retry_after INTEGER NOT NULL DEFAULT 0,
+            user_agent TEXT NOT NULL DEFAULT \'\'
+        )',
+        'CREATE INDEX IF NOT EXISTS idx_admin_login_audit_ts ON admin_login_audit(ts)',
+        'CREATE INDEX IF NOT EXISTS idx_admin_login_audit_ip_ts ON admin_login_audit(ip, ts)',
     );
     foreach ($schema as $statement) {
         $pdo->exec($statement);
@@ -737,12 +759,23 @@ function statuspigeon_maintenance($pdo, $config)
 	$retention = min(36500, max(1, (int) $config['retention_days']));
     $cutoff = time() - ($retention * 86400);
     $cutoffDate = date('Y-m-d', $cutoff);
-    try {
-        $raw = $pdo->prepare('DELETE FROM metrics_raw WHERE ts < :cutoff');
-        $raw->execute(array(':cutoff' => $cutoff));
-        $daily = $pdo->prepare('DELETE FROM uptime_daily WHERE date < :cutoff_date');
-        $daily->execute(array(':cutoff_date' => $cutoffDate));
-    } catch (Exception $e) {
+	try {
+		$raw = $pdo->prepare('DELETE FROM metrics_raw WHERE ts < :cutoff');
+		$raw->execute(array(':cutoff' => $cutoff));
+		$daily = $pdo->prepare('DELETE FROM uptime_daily WHERE date < :cutoff_date');
+		$daily->execute(array(':cutoff_date' => $cutoffDate));
+		$loginAuditRetention = isset($config['login_audit_retention_days'])
+			? (int) $config['login_audit_retention_days'] : $retention;
+		$loginAuditRetention = min(3650, max(1, $loginAuditRetention));
+		$loginAuditCutoff = time() - ($loginAuditRetention * 86400);
+		$loginAudit = $pdo->prepare('DELETE FROM admin_login_audit WHERE ts < :cutoff');
+		$loginAudit->execute(array(':cutoff' => $loginAuditCutoff));
+		$loginRate = $pdo->prepare(
+			'DELETE FROM admin_login_rate_limits
+			 WHERE locked_until < :now AND last_failed_at < :cutoff'
+		);
+		$loginRate->execute(array(':now' => time(), ':cutoff' => $loginAuditCutoff));
+	} catch (Exception $e) {
         error_log('Status Pigeon cleanup failed: ' . $e->getMessage());
     }
 }
