@@ -28,13 +28,43 @@ body {
 .banner-down:before { background: var(--down); }
 .banner-nodata, .banner-loading { background: #f1f2f5; color: var(--muted); }
 .banner-nodata:before, .banner-loading:before { background: var(--nodata); }
+.banner-text { flex: 1; min-width: 0; }
+.banner-close {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; margin: -4px -8px -4px 0; padding: 0;
+  background: none; border: 0; border-radius: 6px; color: inherit; opacity: .55; cursor: pointer;
+}
+.banner-close:hover { opacity: 1; background: rgba(0,0,0,.06); }
+.banner-close svg { width: 14px; height: 14px; }
 .host-list { display: flex; flex-direction: column; gap: 14px; }
+.host-tabs { display: flex; gap: 4px; margin: -8px 0 16px; border-bottom: 1px solid var(--border); }
+.host-tab {
+  border: 0; background: none; padding: 9px 14px; margin-bottom: -1px;
+  font: inherit; font-size: 14px; color: var(--muted); cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.host-tab:hover { color: var(--text); }
+.host-tab.active { color: var(--text); border-bottom-color: var(--text); font-weight: 600; }
+.tab-count {
+  display: inline-block; min-width: 18px; padding: 1px 6px; margin-left: 2px;
+  border-radius: 999px; background: #f1f2f5; color: var(--muted);
+  font-size: 11px; font-weight: 600; text-align: center;
+}
+.host-tab.active .tab-count { background: #edf1f7; color: var(--text); }
 .host-card, .chart-box {
   background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 18px 22px; box-shadow: 0 1px 2px rgba(0,0,0,.03);
 }
 .host-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 .host-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.drag-handle {
+  flex: 0 0 auto; display: inline-flex; align-items: center;
+  color: var(--muted); opacity: .45; cursor: grab; margin-left: -4px;
+}
+.drag-handle:hover { opacity: 1; }
+.drag-handle:active { cursor: grabbing; }
+.drag-handle svg { width: 14px; height: 14px; }
+.host-card.dragging { opacity: .5; }
 .host-name { color: var(--text); font-size: 16px; font-weight: 600; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .host-name:hover, .back-link:hover { text-decoration: underline; }
 .host-meta, .host-uptime, .page-foot { color: var(--muted); font-size: 12px; }
@@ -121,6 +151,7 @@ body {
 .admin-form input { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font: inherit; margin-bottom: 8px; }
 .admin-form button, .admin-card button { border: 0; border-radius: 6px; padding: 9px 15px; background: var(--text); color: #fff; cursor: pointer; font: inherit; }
 .danger-button { background: #c0392b !important; }
+.device-delete-button { padding: 5px 12px; font-size: 12px; }
 .inline-form { margin: 0; }
 .link-button { border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 0; font: inherit; font-size: 13px; white-space: nowrap; }
 .admin-message { border-radius: 6px; padding: 11px 14px; margin-bottom: 16px; font-size: 13px; line-height: 1.6; }
@@ -139,6 +170,12 @@ body {
 .log-table th, .log-table td { padding: 10px 8px; border-top: 1px solid var(--border); text-align: left; }
 .log-table th { color: var(--muted); font-size: 11px; font-weight: 600; }
 .log-table td .badge { font-size: 11px; padding: 3px 8px; }
+.log-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 14px; font-size: 12px; }
+.log-pager-link { display: inline-block; padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); text-decoration: none; }
+.log-pager-link:hover { color: var(--text); background: #f5f7fa; }
+.log-pager-link.current { color: var(--text); background: #edf1f7; font-weight: 600; }
+.log-pager-link.disabled { opacity: .45; pointer-events: none; }
+.log-pager-ellipsis { color: var(--muted); padding: 5px 2px; }
 @media (max-width: 560px) {
   .host-top { flex-direction: column; align-items: flex-start; }
   .day { height: 24px; }
