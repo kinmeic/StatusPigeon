@@ -791,18 +791,64 @@ function statuspigeon_hosts($pdo)
     return $out;
 }
 
-function statuspigeon_recent_reports($pdo, $limit)
+function statuspigeon_recent_reports($pdo, $limit, $offset = 0)
 {
     $limit = max(1, min(500, (int) $limit));
+    $offset = max(0, (int) $offset);
     $query = $pdo->query(
         'SELECT metrics_raw.ts, metrics_raw.mem_usage, metrics_raw.load1,
                 hosts.hostname, hosts.last_status
          FROM metrics_raw
          INNER JOIN hosts ON hosts.id = metrics_raw.host_id
          ORDER BY metrics_raw.ts DESC, metrics_raw.id DESC
-         LIMIT ' . $limit
+         LIMIT ' . $limit . ' OFFSET ' . $offset
     );
     return $query->fetchAll();
+}
+
+function statuspigeon_reports_count($pdo)
+{
+    $query = $pdo->query('SELECT COUNT(*) FROM metrics_raw');
+    return (int) $query->fetchColumn();
+}
+
+/** List every known device for the admin device-management page. */
+function statuspigeon_devices($pdo)
+{
+    $query = $pdo->query(
+        'SELECT id, device_id, hostname, agent_version, os, remote_ip,
+                last_seen, last_status, source, created_at
+         FROM hosts ORDER BY hostname COLLATE NOCASE, id'
+    );
+    return $query->fetchAll();
+}
+
+/**
+ * Delete a device and every row derived from its reports.  A later report
+ * from the same device re-registers it as a brand-new host.
+ */
+function statuspigeon_delete_device($pdo, $hostId)
+{
+    $hostId = (int) $hostId;
+    if ($hostId <= 0) {
+        throw new InvalidArgumentException('invalid host id');
+    }
+    $pdo->beginTransaction();
+    try {
+        foreach (array('metrics_raw', 'uptime_daily') as $table) {
+            $stmt = $pdo->prepare('DELETE FROM ' . $table . ' WHERE host_id = :host_id');
+            $stmt->execute(array(':host_id' => $hostId));
+        }
+        $stmt = $pdo->prepare('DELETE FROM hosts WHERE id = :host_id');
+        $stmt->execute(array(':host_id' => $hostId));
+        if ($stmt->rowCount() === 0) {
+            throw new RuntimeException('设备不存在或已被删除');
+        }
+        $pdo->commit();
+    } catch (Exception $e) {
+        $pdo->rollBack();
+        throw $e;
+    }
 }
 
 function statuspigeon_daily($pdo, $hostId, $days)

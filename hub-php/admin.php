@@ -19,6 +19,16 @@ function statuspigeon_admin_escape($value)
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
+function statuspigeon_admin_mask_key($key)
+{
+    $key = (string) $key;
+    $length = strlen($key);
+    if ($length <= 12) {
+        return str_repeat('*', $length);
+    }
+    return substr($key, 0, 8) . str_repeat('*', $length - 12) . substr($key, -4);
+}
+
 function statuspigeon_admin_redirect($message, $isError, $location)
 {
     $_SESSION['statuspigeon_flash'] = array(
@@ -167,10 +177,28 @@ if ($loggedIn && $action === 'set_admin_password') {
     }
 }
 
+if ($loggedIn && $action === 'delete_device') {
+    if (!statuspigeon_admin_csrf_ok()) {
+        statuspigeon_admin_redirect('请求校验失败', true, 'admin.php?section=devices');
+    }
+    $hostId = isset($_POST['host_id']) ? (int) $_POST['host_id'] : 0;
+    $hostname = isset($_POST['hostname']) ? trim((string) $_POST['hostname']) : '';
+    try {
+        statuspigeon_delete_device($pdo, $hostId);
+        statuspigeon_admin_redirect(
+            '设备' . ($hostname === '' ? '' : '「' . $hostname . '」') . '及其全部数据已删除',
+            false,
+            'admin.php?section=devices'
+        );
+    } catch (Exception $e) {
+        statuspigeon_admin_redirect('删除失败：' . $e->getMessage(), true, 'admin.php?section=devices');
+    }
+}
+
 $loggedIn = !empty($_SESSION['statuspigeon_admin_logged_in']);
 $csrf = (string) $_SESSION['statuspigeon_csrf'];
 $section = isset($_GET['section']) ? (string) $_GET['section'] : 'api';
-if (!in_array($section, array('api', 'logs', 'password'), true)) {
+if (!in_array($section, array('api', 'logs', 'password', 'devices'), true)) {
     $section = 'api';
 }
 $generatedKey = isset($_SESSION['statuspigeon_generated_key'])
@@ -196,12 +224,32 @@ $currentKey = (string) $config['api_key'];
 $adminPasswordConfigured = trim((string) $config['admin_password_hash']) !== '';
 $logReports = array();
 $logError = '';
+$logPageSize = 20;
+$logPage = isset($_GET['page']) ? (int) $_GET['page'] : 1;
+$logPage = max(1, $logPage);
+$logTotal = 0;
+$logPageCount = 1;
 if ($loggedIn && $section === 'logs') {
     try {
-        $logReports = statuspigeon_recent_reports($pdo, 100);
+        $logTotal = statuspigeon_reports_count($pdo);
+        $logPageCount = max(1, (int) ceil($logTotal / $logPageSize));
+        if ($logPage > $logPageCount) {
+            $logPage = $logPageCount;
+        }
+        $logReports = statuspigeon_recent_reports($pdo, $logPageSize, ($logPage - 1) * $logPageSize);
     } catch (Exception $e) {
         $logError = '日志查询失败';
         error_log('Status Pigeon log query failed: ' . $e->getMessage());
+    }
+}
+$devices = array();
+$devicesError = '';
+if ($loggedIn && $section === 'devices') {
+    try {
+        $devices = statuspigeon_devices($pdo);
+    } catch (Exception $e) {
+        $devicesError = '设备列表查询失败';
+        error_log('Status Pigeon device query failed: ' . $e->getMessage());
     }
 }
 ?>
@@ -265,6 +313,7 @@ if ($loggedIn && $section === 'logs') {
           <a class="<?php echo $section === 'api' ? 'active' : ''; ?>" href="admin.php?section=api">API Key 管理</a>
           <a class="<?php echo $section === 'logs' ? 'active' : ''; ?>" href="admin.php?section=logs">日志查询</a>
           <a class="<?php echo $section === 'password' ? 'active' : ''; ?>" href="admin.php?section=password">密码管理</a>
+          <a class="<?php echo $section === 'devices' ? 'active' : ''; ?>" href="admin.php?section=devices">设备管理</a>
         </nav>
         <main class="admin-content">
           <?php if ($section === 'api'): ?>
@@ -285,9 +334,9 @@ if ($loggedIn && $section === 'logs') {
               <?php if ($currentKey === ''): ?>
                 <p>当前 key：<em>未配置</em></p>
               <?php else: ?>
-                <p>当前完整 API key：</p>
+                <p>当前 API key（已脱敏）：</p>
                 <div class="api-key-copy-row">
-                  <code id="current-api-key" class="api-key-value"><?php echo statuspigeon_admin_escape($currentKey); ?></code>
+                  <code id="current-api-key" class="api-key-value"><?php echo statuspigeon_admin_escape(statuspigeon_admin_mask_key($currentKey)); ?></code>
                 </div>
               <?php endif; ?>
               <p class="host-meta">完整接收地址：<code class="break-code"><?php echo statuspigeon_admin_escape($reportUrl); ?></code></p>
@@ -298,7 +347,7 @@ if ($loggedIn && $section === 'logs') {
                   <button type="submit" class="danger-button">生成新 API key</button>
                 </form>
                 <?php if ($currentKey !== ''): ?>
-                  <button type="button" id="copy-current-api-key" class="copy-button">复制当前 API key</button>
+                  <button type="button" id="copy-current-api-key" class="copy-button" data-copy-value="<?php echo statuspigeon_admin_escape($currentKey); ?>">复制当前 API key</button>
                 <?php endif; ?>
               </div>
               <?php if ($currentKey !== ''): ?>
@@ -308,7 +357,7 @@ if ($loggedIn && $section === 'logs') {
           <?php elseif ($section === 'logs'): ?>
             <section class="admin-card">
               <h2>日志查询</h2>
-              <p class="host-meta">显示最近 100 条已接收 report 的记录。</p>
+              <p class="host-meta">共 <?php echo (int) $logTotal; ?> 条已接收 report 的记录，每页 <?php echo (int) $logPageSize; ?> 条。</p>
               <?php if ($logError !== ''): ?>
                 <div class="admin-message admin-error"><?php echo statuspigeon_admin_escape($logError); ?></div>
               <?php elseif (!$logReports): ?>
@@ -331,6 +380,89 @@ if ($loggedIn && $section === 'logs') {
                           <td><?php echo statuspigeon_admin_escape($log['hostname']); ?></td>
                           <td><?php echo statuspigeon_admin_escape(number_format((float) $log['mem_usage'], 1)); ?>%</td>
                           <td><span class="badge badge-<?php echo statuspigeon_admin_escape($logStatus === 'operational' || $logStatus === 'degraded' ? $logStatus : 'no-data'); ?>"><?php echo statuspigeon_admin_escape($logStatusLabel); ?></span></td>
+                        </tr>
+                      <?php endforeach; ?>
+                    </tbody>
+                  </table>
+                </div>
+                <?php if ($logPageCount > 1): ?>
+                  <?php
+                  $logWindow = 2;
+                  $logPages = array(1);
+                  for ($i = max(1, $logPage - $logWindow); $i <= min($logPageCount, $logPage + $logWindow); $i++) {
+                      $logPages[] = $i;
+                  }
+                  $logPages[] = $logPageCount;
+                  $logPages = array_values(array_unique($logPages));
+                  sort($logPages);
+                  ?>
+                  <nav class="log-pager" aria-label="日志分页">
+                    <?php if ($logPage > 1): ?>
+                      <a class="log-pager-link" href="admin.php?section=logs&amp;page=<?php echo $logPage - 1; ?>">上一页</a>
+                    <?php else: ?>
+                      <span class="log-pager-link disabled">上一页</span>
+                    <?php endif; ?>
+                    <?php $logPrevPage = 0; ?>
+                    <?php foreach ($logPages as $logPageNumber): ?>
+                      <?php if ($logPrevPage > 0 && $logPageNumber - $logPrevPage > 1): ?>
+                        <span class="log-pager-ellipsis">…</span>
+                      <?php endif; ?>
+                      <?php if ($logPageNumber === $logPage): ?>
+                        <span class="log-pager-link current"><?php echo $logPageNumber; ?></span>
+                      <?php else: ?>
+                        <a class="log-pager-link" href="admin.php?section=logs&amp;page=<?php echo $logPageNumber; ?>"><?php echo $logPageNumber; ?></a>
+                      <?php endif; ?>
+                      <?php $logPrevPage = $logPageNumber; ?>
+                    <?php endforeach; ?>
+                    <?php if ($logPage < $logPageCount): ?>
+                      <a class="log-pager-link" href="admin.php?section=logs&amp;page=<?php echo $logPage + 1; ?>">下一页</a>
+                    <?php else: ?>
+                      <span class="log-pager-link disabled">下一页</span>
+                    <?php endif; ?>
+                  </nav>
+                <?php endif; ?>
+              <?php endif; ?>
+            </section>
+          <?php elseif ($section === 'devices'): ?>
+            <section class="admin-card">
+              <h2>设备管理</h2>
+              <p class="host-meta">删除设备会同时清除其历史数据；该设备下次上报时会作为全新设备重新出现。</p>
+              <?php if ($devicesError !== ''): ?>
+                <div class="admin-message admin-error"><?php echo statuspigeon_admin_escape($devicesError); ?></div>
+              <?php elseif (!$devices): ?>
+                <p class="empty">暂无设备。</p>
+              <?php else: ?>
+                <div class="log-table-wrap">
+                  <table class="log-table">
+                    <thead>
+                      <tr><th>主机</th><th>设备 ID</th><th>来源</th><th>主机状态</th><th>最近接收</th><th>操作</th></tr>
+                    </thead>
+                    <tbody>
+                      <?php foreach ($devices as $device): ?>
+                        <?php
+                        $deviceStatus = (string) $device['last_status'];
+                        $deviceStatusLabel = $deviceStatus === 'degraded' ? '性能降级'
+                            : ($deviceStatus === 'operational' ? '运行正常'
+                            : ($deviceStatus === 'down' ? '离线' : ($deviceStatus ?: '未知')));
+                        $deviceId = (string) $device['device_id'];
+                        $deviceIdShort = strlen($deviceId) > 20
+                            ? substr($deviceId, 0, 12) . '…' . substr($deviceId, -6) : $deviceId;
+                        ?>
+                        <tr>
+                          <td><?php echo statuspigeon_admin_escape($device['hostname']); ?></td>
+                          <td><code title="<?php echo statuspigeon_admin_escape($deviceId); ?>"><?php echo statuspigeon_admin_escape($deviceIdShort); ?></code></td>
+                          <td><?php echo statuspigeon_admin_escape($device['source']); ?></td>
+                          <td><span class="badge badge-<?php echo statuspigeon_admin_escape(in_array($deviceStatus, array('operational', 'degraded', 'down'), true) ? $deviceStatus : 'no-data'); ?>"><?php echo statuspigeon_admin_escape($deviceStatusLabel); ?></span></td>
+                          <td class="log-time" data-timestamp="<?php echo (int) $device['last_seen']; ?>"><?php echo statuspigeon_admin_escape(date('Y-m-d H:i:s', (int) $device['last_seen'])); ?></td>
+                          <td>
+                            <form method="post" action="admin.php?section=devices" class="inline-form" onsubmit="return confirm('确定删除设备「<?php echo statuspigeon_admin_escape($device['hostname']); ?>」？\n其历史数据将一并删除，且无法恢复。');">
+                              <input type="hidden" name="action" value="delete_device">
+                              <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
+                              <input type="hidden" name="host_id" value="<?php echo (int) $device['id']; ?>">
+                              <input type="hidden" name="hostname" value="<?php echo statuspigeon_admin_escape($device['hostname']); ?>">
+                              <button type="submit" class="danger-button device-delete-button">删除</button>
+                            </form>
+                          </td>
                         </tr>
                       <?php endforeach; ?>
                     </tbody>
@@ -394,7 +526,7 @@ if ($loggedIn && $section === 'logs') {
         if (!button || !value || !status) return;
 
         button.addEventListener('click', function () {
-          var text = value.textContent || '';
+          var text = button.getAttribute('data-copy-value') || value.textContent || '';
           function copied() {
             status.textContent = '已复制完整 API key';
             button.textContent = '已复制';
