@@ -46,6 +46,10 @@ func (r *Reporter) Send(report *pkgmetrics.Report) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+r.token)
+	// Some virtual hosts (Apache+PHP-CGI, panels) strip the Authorization
+	// header before it reaches PHP. The hub accepts X-API-Key as an
+	// equivalent credential, so send both like the LuCI reporter does.
+	req.Header.Set("X-API-Key", r.token)
 
 	resp, err := r.client.Do(req)
 	if err != nil {

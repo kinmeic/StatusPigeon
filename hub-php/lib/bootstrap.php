@@ -120,6 +120,19 @@ function statuspigeon_request_key()
 {
     $authorization = isset($_SERVER['HTTP_AUTHORIZATION'])
         ? trim((string) $_SERVER['HTTP_AUTHORIZATION']) : '';
+    // Apache mod_rewrite/CGI setups can surface the stripped header under a
+    // REDIRECT_ prefix or only via getallheaders().
+    if ($authorization === '' && isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+        $authorization = trim((string) $_SERVER['REDIRECT_HTTP_AUTHORIZATION']);
+    }
+    if ($authorization === '' && function_exists('getallheaders')) {
+        foreach ((array) getallheaders() as $name => $value) {
+            if (strcasecmp((string) $name, 'Authorization') === 0) {
+                $authorization = trim((string) $value);
+                break;
+            }
+        }
+    }
     if (stripos($authorization, 'Bearer ') === 0) {
         return trim(substr($authorization, 7));
     }
