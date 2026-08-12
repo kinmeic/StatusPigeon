@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"runtime"
@@ -273,11 +274,15 @@ func interfacePriority(name string) int {
 
 func collectCPU(out *pkgmetrics.CPUInfo) error {
 	// 负载均值（Linux/macOS；Windows 上 Avg() 返回错误，置零忽略）。
-	if avg, err := load.Avg(); err == nil {
-		out.Load1 = avg.Load1
-		out.Load5 = avg.Load5
-		out.Load15 = avg.Load15
+	avg, err := load.Avg()
+	if err != nil {
+		// 保留上报但记录原因，避免 load 恒为 0 时无从排查。
+		log.Printf("采集 load 失败（本次上报 load 置零）: %v", err)
+		return nil
 	}
+	out.Load1 = avg.Load1
+	out.Load5 = avg.Load5
+	out.Load15 = avg.Load15
 	return nil
 }
 
