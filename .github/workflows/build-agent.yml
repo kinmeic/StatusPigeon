@@ -17,6 +17,7 @@ permissions:
   contents: write
 
 env:
+  GH_REPO: ${{ github.repository }}
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
