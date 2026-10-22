@@ -1,10 +1,10 @@
 # Status Pigeon PHP Hub
 
-这是与 Go Hub 使用同一份 `Report` JSON 契约的 PHP 7.2 + SQLite 版本，适合不能运行常驻 Go 二进制的虚拟主机。它只接收 push 上报，不主动拉取 agent。
+这是与 Go Hub 使用同一份 `Report` JSON 契约的 PHP 7.2–8.4 + SQLite 版本，适合不能运行常驻 Go 二进制的虚拟主机。它只接收 push 上报，不主动拉取 agent。
 
 ## 部署
 
-1. 确认虚拟主机启用了 PHP 7.2（或更高版本）以及 `pdo_sqlite`、`json` 扩展。
+1. 确认虚拟主机启用了 PHP 7.2–8.4 以及 `pdo_sqlite`、`json` 扩展。
 2. 将 `hub-php/` 的内容放到网站根目录，复制 `config.example.php` 为 `config.php`。
 3. 修改 `config.php` 中的 `api_key`。数据库路径建议放在网站根目录之外，并保证 PHP 进程可写。
 4. 直接访问 `/index.php`。本版本不依赖 URL rewrite。
@@ -12,6 +12,10 @@
 管理页面为 `/admin.php`。首次登录使用当前 `api_key`，进入后可以管理 API key、查询最近接收日志，并设置独立的管理密码。新配置写入同目录的 `config.local.php`，因此 PHP-FPM 用户必须对网站目录有写权限；如果虚拟主机禁止 PHP 写文件，请手动维护 `config.php`。如需让管理页显示固定的完整接收地址，可在 `config.php` 设置 `public_base_url`，例如 `https://example.com/statuspigeon`。
 
 管理登录默认启用防暴力破解保护：同一直接连接来源在 15 分钟内连续 5 次凭据错误后临时锁定 15 分钟；每次失败会按 250ms、500ms、1s、2s…递增延迟，达到锁定阈值时返回 HTTP `429` 和 `Retry-After`。登录成功后会清除该来源的失败状态。失败、触发锁定、CSRF 校验失败和成功登录都会写入 SQLite 的安全审计日志，可在管理页的“日志查询”中查看；锁定期间不会为每一次重复请求追加日志，避免攻击者利用日志写入制造存储压力。日志默认保留 90 天。可在 `config.php` 调整 `login_max_failures`、`login_window_seconds`、`login_lockout_seconds`、`login_delay_base_ms`、`login_delay_max_ms` 和 `login_audit_retention_days`。限速使用服务器看到的 `REMOTE_ADDR`，不会信任客户端提交的 `X-Forwarded-For` 来绕过限制。
+
+## 存储与空间
+
+每台上报设备每秒最多保存一条样本（按 `(host_id, ts)` 去重，同一秒内内容不同的重复上报视为同一次重试）。原始样本按 `retention_days` 保留（默认 30 天；前端图表最长回看 7 天，追求最小体积可设为 7）。每日可用性聚合（`uptime_daily`，每台每天一行，体积可忽略）按 `uptime_bar_days` 保留（默认 30 天），不受 `retention_days` 调小影响，因此缩短原始数据保留期不会丢状态页的可用性历史。SQLite 在删除数据后不会自动缩小数据库文件，hub 会在有请求进来时按 `vacuum_interval_days`（默认 7 天，范围 1–3650）定期执行 `VACUUM` 回收空间。从旧版本升级后的第一次请求会同时完成旧数据清理、索引迁移和首次 VACUUM，数据库较大时该请求可能明显变慢，属一次性开销。
 
 接收地址为：
 

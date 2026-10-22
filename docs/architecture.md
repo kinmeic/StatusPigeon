@@ -4,7 +4,7 @@
 
 Status Pigeon 是一个 **push + pull 混合模型** 的轻量级服务器状态监控系统，由两部分组成。
 
-仓库同时提供两个适合受限环境的部署端：`hub-php/` 是 PHP 7.2 + SQLite 的无 rewrite Hub；`luci-app-statuspigeon/` 是 OpenWrt 的 push-only LuCI app。PHP Hub 在网页请求中顺带执行失联标记和数据清理，OpenWrt app 由 procd 定时器和 iface hotplug 事件驱动，不提供 listen 模式：
+仓库同时提供两个适合受限环境的部署端：`hub-php/` 是 PHP 7.2–8.4 + SQLite 的无 rewrite Hub；`luci-app-statuspigeon/` 是 OpenWrt 的 push-only LuCI app。PHP Hub 在网页请求中顺带执行失联标记和数据清理，OpenWrt app 由 procd 定时器和 iface hotplug 事件驱动，不提供 listen 模式：
 
 ```
                         ┌─────────────────────────────────────────────┐
@@ -61,7 +61,7 @@ Agent 主动向 Hub 发起 HTTP POST 上报。**能穿透 NAT**，是家用机�
 | **Agent** | `agent/` | Go 二进制，双模式（push/listen），gopsutil 采集 |
 | **Hub** | `hub/` | Go 二进制：接收上报 + 主动拉取 + 存储 + API + 静态页 |
 | **前端** | `hub/assets/` | 静态 HTML/CSS/JS，embed 打包进 hub 单二进制 |
-| **PHP Hub** | `hub-php/` | PHP 7.2 接收 + SQLite 存储 + 直接文件 API + HTML 状态页 |
+| **PHP Hub** | `hub-php/` | PHP 7.2–8.4 接收 + SQLite 存储 + 直接文件 API + HTML 状态页 |
 | **OpenWrt app** | `luci-app-statuspigeon/` | LuCI JSON 菜单/ACL + UCI 配置 + shell JSON push |
 
 ## Hub 内部结构（hub/*.go）

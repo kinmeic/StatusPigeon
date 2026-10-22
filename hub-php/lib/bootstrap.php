@@ -1,5 +1,5 @@
 <?php
-/** Shared bootstrap for every PHP endpoint. PHP 7.2 compatible. */
+/** Shared bootstrap for every PHP endpoint. PHP 7.2-8.4 compatible. */
 
 if (defined('STATUSPIGEON_BOOTSTRAPPED')) {
     return;
@@ -21,14 +21,17 @@ $config = array(
     // Deployments can still override this value in config.php or with
     // STATUSPIGEON_TIMEZONE.
     'timezone' => 'Asia/Shanghai',
-    'retention_days' => 90,
-    'uptime_bar_days' => 60,
+    'retention_days' => 30,
+    'uptime_bar_days' => 30,
     // Deprecated compatibility setting; CPU percentage is no longer used.
     'degraded_cpu' => 90.0,
     'degraded_mem' => 95.0,
     'report_interval' => 300,
     'offline_periods' => 3,
     'max_report_bytes' => 1048576,
+    // Retention deletes never shrink the SQLite file on their own; a
+    // rate-limited VACUUM reclaims the freed pages (1-3650 days).
+    'vacuum_interval_days' => 7,
     // Admin login protection: five failures in 15 minutes trigger a 15-minute
     // per-source lockout. Failed attempts also use capped exponential delay.
     'login_max_failures' => 5,
