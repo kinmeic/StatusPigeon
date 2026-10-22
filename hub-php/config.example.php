@@ -28,6 +28,9 @@ return array(
 
     // Report timestamps are displayed in this timezone.
     'timezone' => 'Asia/Shanghai',
+    // Raw samples are kept this long; the metrics charts look back at most
+    // 7 days, so 7 is the smallest useful value. Daily uptime aggregates
+    // are kept for uptime_bar_days regardless of this setting.
     'retention_days' => 30,
     'uptime_bar_days' => 30,
     // Deprecated compatibility setting; CPU percentage is no longer used.

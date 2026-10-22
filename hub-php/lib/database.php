@@ -816,8 +816,13 @@ function statuspigeon_maintenance($pdo, $config)
     }
 
 	$retention = min(36500, max(1, (int) $config['retention_days']));
-    $cutoff = time() - ($retention * 86400);
-    $cutoffDate = date('Y-m-d', $cutoff);
+	$cutoff = time() - ($retention * 86400);
+	// Daily aggregates are one small row per host per day and power the
+	// uptime bars, so they outlive the raw samples whenever the bars reach
+	// back further than the raw retention window.
+	$barDays = isset($config['uptime_bar_days']) ? (int) $config['uptime_bar_days'] : 0;
+	$dailyDays = min(36500, max($retention, $barDays));
+	$cutoffDate = date('Y-m-d', time() - ($dailyDays * 86400));
 	try {
 		$raw = $pdo->prepare('DELETE FROM metrics_raw WHERE ts < :cutoff');
 		$raw->execute(array(':cutoff' => $cutoff));

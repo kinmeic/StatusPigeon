@@ -50,6 +50,7 @@ $config = array(
 	'report_interval' => 300,
 	'offline_periods' => 3,
 	'retention_days' => 30,
+	'uptime_bar_days' => 60,
 	'vacuum_interval_days' => 7,
 );
 
@@ -115,13 +116,20 @@ try {
 	$count = (int) $pdo->query('SELECT COUNT(*) FROM metrics_raw')->fetchColumn();
 	storage_assert($count === 2, 'ingest broken after migration');
 
-	// Retention deletes rows past the window and VACUUM returns the freed
-	// pages to the filesystem instead of leaving the file at its high-water
-	// mark. Checkpoint first so the measured size includes WAL content.
+	// Retention deletes raw rows past the window while daily aggregates
+	// survive up to the uptime-bar span, and VACUUM returns the freed pages
+	// to the filesystem instead of leaving the file at its high-water mark.
+	// Checkpoint first so the measured size includes WAL content.
 	$old = time() - 40 * 86400;
 	for ($i = 0; $i < 300; $i++) {
 		statuspigeon_ingest($pdo, storage_report($old + $i, 40), $config);
 	}
+	$hostId = (int) $pdo->query('SELECT id FROM hosts LIMIT 1')->fetchColumn();
+	$pdo->exec(
+		"INSERT OR IGNORE INTO uptime_daily
+		 (host_id, date, status, uptime_pct, total_samples, degraded_samples, down_samples)
+		 VALUES (" . $hostId . ", date('now', '-70 days'), 'operational', 100, 1, 0, 0)"
+	);
 	$pdo->exec('PRAGMA wal_checkpoint(TRUNCATE)');
 	clearstatcache();
 	$sizeBefore = (int) filesize($path);
@@ -130,7 +138,11 @@ try {
 	$oldDaily = (int) $pdo->query(
 		"SELECT COUNT(*) FROM uptime_daily WHERE date < date('now', '-30 days')"
 	)->fetchColumn();
-	storage_assert($count === 2 && $oldDaily === 0, 'retention dropped live rows or kept expired rows');
+	$ancientDaily = (int) $pdo->query(
+		"SELECT COUNT(*) FROM uptime_daily WHERE date < date('now', '-60 days')"
+	)->fetchColumn();
+	storage_assert($count === 2 && $oldDaily === 1 && $ancientDaily === 0,
+		'retention dropped live rows, killed bar-span aggregates, or kept expired aggregates');
 	storage_assert((int) statuspigeon_meta_get($pdo, 'last_vacuum_ts') > 0, 'vacuum attempt was not recorded');
 	clearstatcache();
 	$sizeAfter = (int) filesize($path);
