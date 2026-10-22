@@ -1,17 +1,17 @@
-name: Build statuspigeon agent
+name: Build StatusPigeon release
 
 on:
   # Future version tags build and publish automatically.
   push:
     tags:
       - 'v*'
-  # Manual runs attach the binaries to an existing release, e.g. v1.0.9.
+  # Manual runs build and attach all release packages to the selected tag.
   workflow_dispatch:
     inputs:
       tag:
         description: '目标 release 的 tag（release 不存在时会基于该 git tag 创建）'
         required: true
-        default: 'v1.0.9'
+        default: 'v1.0.11'
 
 permissions:
   contents: write
@@ -38,51 +38,181 @@ jobs:
           fi
 
   build:
-    name: agent ${{ matrix.target }}
+    name: ${{ matrix.product }} ${{ matrix.target }}
     needs: release
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
+      max-parallel: 6
       matrix:
-        target:
-          - linux-amd64
-          - linux-arm64
+        include:
+          - product: agent
+            target: linux-amd64
+          - product: agent
+            target: linux-arm64
+          - product: agent
+            target: linux-arm
+          - product: agent
+            target: linux-mipsle
+          - product: agent
+            target: linux-386
+          - product: agent
+            target: darwin-amd64
+          - product: agent
+            target: darwin-arm64
+          - product: hub
+            target: linux-amd64
+          - product: hub
+            target: linux-arm64
+          - product: hub
+            target: linux-arm
+          - product: hub
+            target: linux-386
+          - product: hub
+            target: darwin-amd64
+          - product: hub
+            target: darwin-arm64
 
     steps:
       - name: Check out source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: agent/go.mod
-          cache-dependency-path: agent/go.sum
+          go-version-file: ${{ matrix.product }}/go.mod
+          cache-dependency-path: ${{ matrix.product }}/go.sum
 
-      - name: Build agent
-        run: make -C agent ${{ matrix.target }}
+      - name: Build binary
+        env:
+          PRODUCT: ${{ matrix.product }}
+          TARGET: ${{ matrix.target }}
+        run: make -C "$PRODUCT" "$TARGET"
 
       - name: Package archive
         env:
+          PRODUCT: ${{ matrix.product }}
           TARGET: ${{ matrix.target }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -eu
-          stage="$RUNNER_TEMP/package/statuspigeon-agent"
+          binary="statuspigeon-$PRODUCT"
+          stage="$RUNNER_TEMP/package/$binary"
           mkdir -p "$stage"
-          cp "agent/dist/statuspigeon-agent-$TARGET" "$stage/statuspigeon-agent"
-          cp agent/config.example.yaml "$stage/"
+          cp "$PRODUCT/dist/$binary-$TARGET" "$stage/$binary"
+          cp "$PRODUCT/config.example.yaml" "$stage/"
           mkdir -p artifacts
-          tar -czf "artifacts/statuspigeon-agent-$TARGET.tar.gz" -C "$RUNNER_TEMP/package" statuspigeon-agent
+          tar -czf "artifacts/$binary-$TARGET.tar.gz" -C "$RUNNER_TEMP/package" "$binary"
           cd artifacts
-          sha256sum "statuspigeon-agent-$TARGET.tar.gz" > "statuspigeon-agent-$TARGET.tar.gz.sha256"
+          sha256sum "$binary-$TARGET.tar.gz" > "$binary-$TARGET.tar.gz.sha256"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: statuspigeon-agent-${{ matrix.target }}
+          name: statuspigeon-${{ matrix.product }}-${{ matrix.target }}
           path: artifacts/
           if-no-files-found: error
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ env.RELEASE_TAG }}
+        run: gh release upload "$TAG" artifacts/* --clobber
+
+  luci:
+    name: LuCI ${{ matrix.format }} (OpenWrt ${{ matrix.openwrt }})
+    needs: release
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - format: ipk
+            openwrt: 24.10.8
+            sdk_url: https://downloads.openwrt.org/releases/24.10.8/targets/x86/64/openwrt-sdk-24.10.8-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            sdk_sha256: ac4a0405d2eea821b06f93c14ba13ffa90ad0457648903df7dde02570027ab21
+          - format: apk
+            openwrt: 25.12.5
+            sdk_url: https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+            sdk_sha256: 0c8df0151a1e88feb7c03d694d61f6a18d51872815b7c811d76e2b77504d5e9c
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install SDK unpacking tools
+        run: sudo apt-get update && sudo apt-get install --yes zstd
+
+      - name: Download and verify OpenWrt SDK
+        env:
+          SDK_URL: ${{ matrix.sdk_url }}
+          SDK_SHA256: ${{ matrix.sdk_sha256 }}
+        run: |
+          set -eu
+          SDK_ARCHIVE="$RUNNER_TEMP/openwrt-sdk.tar.zst"
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --retry 3 --output "$SDK_ARCHIVE" "$SDK_URL"
+          printf '%s  %s\n' "$SDK_SHA256" "$SDK_ARCHIVE" | sha256sum --check --status
+          mkdir -p "$RUNNER_TEMP/openwrt-sdk"
+          tar --extract --zstd --file "$SDK_ARCHIVE" --strip-components=1 --directory "$RUNNER_TEMP/openwrt-sdk"
+
+      - name: Build LuCI package
+        working-directory: ${{ runner.temp }}/openwrt-sdk
+        env:
+          PACKAGE_NAME: luci-app-statuspigeon
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -eu
+          VERSION="${TAG#v}"
+          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$VERSION/" "$GITHUB_WORKSPACE/luci-app-statuspigeon/Makefile"
+          printf 'src-link statuspigeon %s\n' "$GITHUB_WORKSPACE" >> feeds.conf
+          ./scripts/feeds update -a
+          ./scripts/feeds install -p statuspigeon -f "$PACKAGE_NAME"
+          make defconfig
+          make package/$PACKAGE_NAME/download V=s
+          make package/$PACKAGE_NAME/check V=s
+          make package/$PACKAGE_NAME/compile V=s -j"$(nproc)"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          find bin/packages -type f \( -name "$PACKAGE_NAME*.ipk" -o -name "$PACKAGE_NAME*.apk" \) \
+            -exec cp --target-directory="$GITHUB_WORKSPACE/artifacts" {} +
+          test -n "$(find "$GITHUB_WORKSPACE/artifacts" -type f -print -quit)"
+          cd "$GITHUB_WORKSPACE/artifacts"
+          for package in "$PACKAGE_NAME"*; do
+            sha256sum "$package" > "$package.sha256"
+          done
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ env.RELEASE_TAG }}
+        run: gh release upload "$TAG" artifacts/* --clobber
+
+  php-hub:
+    name: Package PHP Hub
+    needs: release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Package PHP Hub
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -eu
+          VERSION="${TAG#v}"
+          mkdir -p artifacts
+          archive="statuspigeon-hub-php-$VERSION.tar.gz"
+          tar -czf "artifacts/$archive" hub-php
+          cd artifacts
+          sha256sum "$archive" > "$archive.sha256"
 
       - name: Upload to release
         env:
