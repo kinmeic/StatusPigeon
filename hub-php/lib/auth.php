@@ -182,6 +182,25 @@ function statuspigeon_admin_login_delay_ms($failedCount, $policy)
     return max(0, $delay);
 }
 
+/**
+ * Roll back a transaction whether PDO tracks it or not.  PDO only tracks
+ * transactions opened via beginTransaction() on PHP 8.2+, so transactions
+ * started with a raw BEGIN statement must also be rolled back with a raw
+ * statement; rolling back when nothing is active must stay silent.
+ */
+function statuspigeon_rollback_quietly($pdo)
+{
+    if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+        return;
+    }
+    try {
+        $pdo->exec('ROLLBACK');
+    } catch (Exception $ignored) {
+        // No transaction was active.
+    }
+}
+
 /** Record one bad credential and atomically update the source lock state. */
 function statuspigeon_admin_login_record_failure($pdo, $ip, $now, $config)
 {
@@ -192,12 +211,14 @@ function statuspigeon_admin_login_record_failure($pdo, $ip, $now, $config)
 
     // BEGIN IMMEDIATE serializes concurrent attempts from the same SQLite
     // database, preventing two workers from both accepting the same count.
+    // The transaction is managed with raw COMMIT/ROLLBACK statements because
+    // PDO does not track a raw BEGIN as a transaction (PHP 8.2+).
     $pdo->exec('BEGIN IMMEDIATE TRANSACTION');
     try {
         $row = statuspigeon_admin_login_rate_row($pdo, $ip);
         if ($row && (int) $row['locked_until'] > $now) {
             $retryAfter = max(1, (int) $row['locked_until'] - $now);
-            $pdo->commit();
+            $pdo->exec('COMMIT');
             return array(
                 'failed_count' => (int) $row['failed_count'],
                 'delay_ms' => 0,
@@ -247,7 +268,7 @@ function statuspigeon_admin_login_record_failure($pdo, $ip, $now, $config)
                 ':locked_until' => $lockedUntil,
             ));
         }
-        $pdo->commit();
+        $pdo->exec('COMMIT');
         return array(
             'failed_count' => $failedCount,
             'delay_ms' => $delayMs,
@@ -255,9 +276,7 @@ function statuspigeon_admin_login_record_failure($pdo, $ip, $now, $config)
             'retry_after' => $locked ? $policy['lockout_seconds'] : 0,
         );
     } catch (Exception $e) {
-        if ($pdo->inTransaction()) {
-            $pdo->rollBack();
-        }
+        statuspigeon_rollback_quietly($pdo);
         throw $e;
     }
 }
