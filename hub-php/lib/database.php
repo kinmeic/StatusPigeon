@@ -20,7 +20,9 @@ function statuspigeon_db($config)
     $pdo = new PDO('sqlite:' . $path);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-	if (is_file($path)) {
+	// Some shared hosts list chmod in disable_functions; calling it there
+	// is a fatal Error on PHP 8+, which the @ operator cannot suppress.
+	if (is_file($path) && function_exists('chmod')) {
 		@chmod($path, 0640);
 	}
     $pdo->exec('PRAGMA busy_timeout=5000');

@@ -84,12 +84,18 @@ function statuspigeon_admin_write_local($changes)
         @unlink($temporary);
         throw new RuntimeException('无法写入临时配置文件');
     }
-    @chmod($temporary, 0640);
+    // Some shared hosts list chmod in disable_functions; calling it there
+    // is a fatal Error on PHP 8+, which the @ operator cannot suppress.
+    if (function_exists('chmod')) {
+        @chmod($temporary, 0640);
+    }
     if (!@rename($temporary, $path)) {
         @unlink($temporary);
         throw new RuntimeException('无法替换 config.local.php');
     }
-    @chmod($path, 0640);
+    if (function_exists('chmod')) {
+        @chmod($path, 0640);
+    }
 }
 
 function statuspigeon_admin_credential_ok($credential, $config)
