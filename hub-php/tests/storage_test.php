@@ -81,6 +81,13 @@ try {
 	}
 	storage_assert($rejected, 'unique index does not cover (host_id, ts)');
 
+	// Simulate a sample row written by an older hub: the full report JSON
+	// sits in the payload column and there is no dedicated disk value. The
+	// pending flag is what a not-yet-migrated database would look like.
+	$legacyPayload = statuspigeon_json_encode(array('metrics' => array('os' => array('disk_used_pct' => 83))));
+	$pdo->exec('UPDATE metrics_raw SET payload = ' . $pdo->quote($legacyPayload));
+	statuspigeon_meta_set($pdo, 'metric_payloads_cleared', '');
+
 	// Reopen a legacy schema that still deduplicates on the full payload and
 	// holds two samples for one second; the migration must collapse them.
 	$pdo->exec('DROP INDEX idx_raw_host_ts_unique');
@@ -115,6 +122,23 @@ try {
 	statuspigeon_ingest($pdo, storage_report($now + 3600, 50), $config);
 	$count = (int) $pdo->query('SELECT COUNT(*) FROM metrics_raw')->fetchColumn();
 	storage_assert($count === 2, 'ingest broken after migration');
+
+	// The whole-report payload is reduced to the one charted number.
+	$disk = (float) $pdo->query('SELECT disk_used_pct FROM metrics_raw ORDER BY id LIMIT 1')->fetchColumn();
+	storage_assert($disk === 83.0, 'disk value was not extracted from the legacy payload');
+	$leftover = (int) $pdo->query("SELECT COUNT(*) FROM metrics_raw WHERE payload != ''")->fetchColumn();
+	storage_assert($leftover === 0, 'legacy payloads were not cleared');
+	storage_assert(statuspigeon_meta_get($pdo, 'metric_payloads_cleared') !== '', 'payload clear flag missing');
+	storage_assert(statuspigeon_meta_get($pdo, 'last_vacuum_ts') === '0', 'payload migration did not queue a vacuum');
+	$lastRow = $pdo->query('SELECT payload, disk_used_pct FROM metrics_raw ORDER BY id DESC LIMIT 1')->fetch();
+	storage_assert((string) $lastRow['payload'] === '' && (float) $lastRow['disk_used_pct'] === 25.0,
+		'new sample stored the full payload or lost the disk value');
+	$hostId = (int) $pdo->query('SELECT id FROM hosts LIMIT 1')->fetchColumn();
+	$series = statuspigeon_metrics_series($pdo, $hostId, $now);
+	storage_assert(count($series) === 2
+		&& $series[0]['disk_used_pct'] === 83.0
+		&& $series[1]['disk_used_pct'] === 25.0,
+		'series disk values broken by the payload reduction');
 
 	// Retention deletes raw rows past the window while daily aggregates
 	// survive up to the uptime-bar span, and VACUUM returns the freed pages

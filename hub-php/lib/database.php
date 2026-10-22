@@ -5,8 +5,9 @@
  * The schema intentionally mirrors hub/store.go so a database can be moved
  * between the Go and PHP hub implementations when the SQLite versions are
  * compatible.  Divergence: this hub enforces one sample per host and second
- * (host_id, ts) and keeps the hub_meta maintenance table; the Go hub rebuilds
- * its own (host_id, ts, payload) uniqueness when it opens such a database.
+ * (host_id, ts), keeps the hub_meta maintenance table, and stores only the
+ * charted numbers per sample (payload stays empty); the Go hub rebuilds its
+ * own (host_id, ts, payload) uniqueness and keeps writing full payloads.
  */
 
 function statuspigeon_db($config)
@@ -60,6 +61,7 @@ function statuspigeon_db($config)
             cpu_usage REAL,
             mem_usage REAL,
             load1 REAL,
+            disk_used_pct REAL,
             payload TEXT NOT NULL,
             FOREIGN KEY(host_id) REFERENCES hosts(id)
         )',
@@ -108,6 +110,7 @@ function statuspigeon_db($config)
     statuspigeon_migrate_host_identity($pdo);
     statuspigeon_ensure_host_remote_ip($pdo);
 	statuspigeon_ensure_metric_uniqueness($pdo);
+	statuspigeon_ensure_metric_disk_column($pdo);
     // Existing databases may still contain legacy I/O columns.  They are
     // intentionally left in place for non-destructive upgrades, but no new
     // report reads or writes those columns.
@@ -135,6 +138,60 @@ function statuspigeon_ensure_metric_uniqueness($pdo)
 		'CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_host_ts_unique
 		 ON metrics_raw(host_id, ts)'
 	);
+}
+
+/**
+ * Historical rows embed the whole report JSON in metrics_raw.payload, but
+ * only disk_used_pct is ever charted.  Extract that one number into its own
+ * column and stop storing the bulk: each sample shrinks from roughly a
+ * kilobyte to a few dozen bytes.  Runs in id-scanned batches so a slow
+ * shared host resumes on the next request instead of timing out halfway.
+ */
+function statuspigeon_ensure_metric_disk_column($pdo)
+{
+	$hasDisk = false;
+	foreach ($pdo->query('PRAGMA table_info(metrics_raw)')->fetchAll() as $column) {
+		if (isset($column['name']) && $column['name'] === 'disk_used_pct') {
+			$hasDisk = true;
+			break;
+		}
+	}
+	if (!$hasDisk) {
+		$pdo->exec('ALTER TABLE metrics_raw ADD COLUMN disk_used_pct REAL');
+	}
+	if (statuspigeon_meta_get($pdo, 'metric_payloads_cleared') !== '') {
+		return;
+	}
+
+	$find = $pdo->prepare(
+		'SELECT id, payload FROM metrics_raw
+		 WHERE id > :cursor AND payload != \'\' ORDER BY id LIMIT 500'
+	);
+	$update = $pdo->prepare(
+		'UPDATE metrics_raw SET disk_used_pct=:disk, payload=\'\' WHERE id=:id'
+	);
+	$cursor = 0;
+	while (true) {
+		$find->execute(array(':cursor' => $cursor));
+		$rows = $find->fetchAll();
+		if (count($rows) === 0) {
+			break;
+		}
+		foreach ($rows as $row) {
+			$payload = json_decode((string) $row['payload'], true);
+			$disk = null;
+			if (isset($payload['metrics']['os']['disk_used_pct'])
+				&& is_numeric($payload['metrics']['os']['disk_used_pct'])) {
+				$disk = (float) $payload['metrics']['os']['disk_used_pct'];
+			}
+			$update->execute(array(':disk' => $disk, ':id' => (int) $row['id']));
+			$cursor = (int) $row['id'];
+		}
+	}
+
+	statuspigeon_meta_set($pdo, 'metric_payloads_cleared', '1');
+	// Reclaiming these pages should not wait for the weekly vacuum cycle.
+	statuspigeon_meta_set($pdo, 'last_vacuum_ts', '0');
 }
 
 function statuspigeon_migrate_host_identity($pdo)
@@ -537,7 +594,6 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
     $summary = statuspigeon_summary($metrics);
     $now = time();
     $date = date('Y-m-d', $report['timestamp']);
-    $payload = statuspigeon_json_encode($report);
     $deviceId = statuspigeon_report_device_id($report);
     $remoteIp = statuspigeon_public_ip($remoteIp);
     if ($remoteIp === '') {
@@ -631,19 +687,20 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
         ));
 
         $insertMetric = $pdo->prepare(
-			'INSERT OR IGNORE INTO metrics_raw
-             (host_id, ts, cpu_usage, mem_usage, load1, payload)
-             VALUES (:host_id, :ts, :cpu, :mem, :load1, :payload)'
+            'INSERT OR IGNORE INTO metrics_raw
+             (host_id, ts, cpu_usage, mem_usage, load1, disk_used_pct, payload)
+             VALUES (:host_id, :ts, :cpu, :mem, :load1, :disk, \'\')'
         );
         $insertMetric->execute(array(
             ':host_id' => $hostId,
             ':ts' => $report['timestamp'],
-            // cpu_usage is a legacy column; new reports do not store CPU
-            // percentage even when an older client included that field.
+            // cpu_usage and payload are legacy columns kept for schema
+            // compatibility; the charted numbers live in their own columns.
             ':cpu' => null,
             ':mem' => $metrics['mem']['used_pct'],
             ':load1' => $metrics['cpu']['load1'],
-            ':payload' => $payload,
+            ':disk' => $metrics['os']['disk_used_pct'] === null
+                ? null : (float) $metrics['os']['disk_used_pct'],
         ));
 
         $findDaily = $pdo->prepare(
@@ -987,26 +1044,35 @@ function statuspigeon_daily($pdo, $hostId, $days)
     return $out;
 }
 
+function statuspigeon_series_payload_disk($rawPayload)
+{
+    $payload = json_decode((string) $rawPayload, true);
+    if (isset($payload['metrics']['os']['disk_used_pct'])
+        && is_numeric($payload['metrics']['os']['disk_used_pct'])) {
+        return (float) $payload['metrics']['os']['disk_used_pct'];
+    }
+    return null;
+}
+
 function statuspigeon_metrics_series($pdo, $hostId, $fromTs)
 {
     $stmt = $pdo->prepare(
-        'SELECT ts, mem_usage, load1, payload
+        'SELECT ts, mem_usage, load1, disk_used_pct, payload
          FROM metrics_raw
          WHERE host_id=:host_id AND ts >= :from_ts ORDER BY ts ASC LIMIT 10000'
     );
     $stmt->execute(array(':host_id' => (int) $hostId, ':from_ts' => (int) $fromTs));
     $out = array();
     foreach ($stmt->fetchAll() as $row) {
-        $payload = json_decode((string) $row['payload'], true);
-        $payload = is_array($payload) ? $payload : array();
-        $os = isset($payload['metrics']['os']) && is_array($payload['metrics']['os'])
-            ? $payload['metrics']['os'] : array();
+        // Rows written before the disk column exist only as payload JSON
+        // until the backfill migration reaches them.
         $out[] = array(
             'ts' => (int) $row['ts'],
             'mem' => $row['mem_usage'] === null ? null : (float) $row['mem_usage'],
             'load1' => $row['load1'] === null ? null : (float) $row['load1'],
-            'disk_used_pct' => isset($os['disk_used_pct'])
-                ? statuspigeon_metric_number($os['disk_used_pct'], 0) : null,
+            'disk_used_pct' => $row['disk_used_pct'] !== null
+                ? (float) $row['disk_used_pct']
+                : statuspigeon_series_payload_disk((string) $row['payload']),
         );
     }
     return $out;
