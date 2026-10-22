@@ -20,8 +20,25 @@ env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
+  release:
+    # A single job creates the release so concurrent matrix builds can never
+    # race two releases into existence for one tag.
+    name: Ensure release exists
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create release if missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -eu
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "StatusPigeon $TAG" --generate-notes
+          fi
+
   build:
     name: agent ${{ matrix.target }}
+    needs: release
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -70,9 +87,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ env.RELEASE_TAG }}
-        run: |
-          set -eu
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "StatusPigeon $TAG" --generate-notes
-          fi
-          gh release upload "$TAG" artifacts/* --clobber
+        run: gh release upload "$TAG" artifacts/* --clobber
