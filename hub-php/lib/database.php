@@ -1,10 +1,12 @@
 <?php
 /**
- * SQLite storage and query helpers for the PHP 7.2 hub.
+ * SQLite storage and query helpers for the PHP hub (7.2-8.4).
  *
  * The schema intentionally mirrors hub/store.go so a database can be moved
  * between the Go and PHP hub implementations when the SQLite versions are
- * compatible.
+ * compatible.  Divergence: this hub enforces one sample per host and second
+ * (host_id, ts) and keeps the hub_meta maintenance table; the Go hub rebuilds
+ * its own (host_id, ts, payload) uniqueness when it opens such a database.
  */
 
 function statuspigeon_db($config)
@@ -59,7 +61,6 @@ function statuspigeon_db($config)
             payload TEXT NOT NULL,
             FOREIGN KEY(host_id) REFERENCES hosts(id)
         )',
-        'CREATE INDEX IF NOT EXISTS idx_raw_host_ts ON metrics_raw(host_id, ts)',
         'CREATE TABLE IF NOT EXISTS uptime_daily (
             host_id INTEGER NOT NULL,
             date TEXT NOT NULL,
@@ -94,6 +95,10 @@ function statuspigeon_db($config)
         )',
         'CREATE INDEX IF NOT EXISTS idx_admin_login_audit_ts ON admin_login_audit(ts)',
         'CREATE INDEX IF NOT EXISTS idx_admin_login_audit_ip_ts ON admin_login_audit(ip, ts)',
+        'CREATE TABLE IF NOT EXISTS hub_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )',
     );
     foreach ($schema as $statement) {
         $pdo->exec($statement);
@@ -111,18 +116,22 @@ function statuspigeon_ensure_metric_uniqueness($pdo)
 {
 	$indexes = $pdo->query('PRAGMA index_list(metrics_raw)')->fetchAll();
 	foreach ($indexes as $index) {
-		if (isset($index['name']) && $index['name'] === 'idx_raw_host_ts_payload_unique') {
+		if (isset($index['name']) && $index['name'] === 'idx_raw_host_ts_unique') {
 			return;
 		}
 	}
-	$pdo->exec('DROP INDEX IF EXISTS idx_raw_host_ts_unique');
+	// Older schemas deduplicated on the full payload, which stored it twice
+	// (row plus index). One sample per host and second still absorbs network
+	// retries and keeps the payload stored only once.
+	$pdo->exec('DROP INDEX IF EXISTS idx_raw_host_ts_payload_unique');
+	$pdo->exec('DROP INDEX IF EXISTS idx_raw_host_ts');
 	$pdo->exec(
 		'DELETE FROM metrics_raw
-		 WHERE id NOT IN (SELECT MIN(id) FROM metrics_raw GROUP BY host_id, ts, payload)'
+		 WHERE id NOT IN (SELECT MIN(id) FROM metrics_raw GROUP BY host_id, ts)'
 	);
 	$pdo->exec(
-		'CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_host_ts_payload_unique
-		 ON metrics_raw(host_id, ts, payload)'
+		'CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_host_ts_unique
+		 ON metrics_raw(host_id, ts)'
 	);
 }
 
@@ -585,14 +594,15 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
 
 		// Retries with the same host/timestamp are idempotent. Without this,
 		// network retries inflate daily sample counts and distort uptime.
+		// Uniqueness is (host_id, ts): a differing payload within the same
+		// second is treated as the same sample and dropped.
 		$findMetric = $pdo->prepare(
 			'SELECT id FROM metrics_raw
-			 WHERE host_id=:host_id AND ts=:ts AND payload=:payload LIMIT 1'
+			 WHERE host_id=:host_id AND ts=:ts LIMIT 1'
 		);
 		$findMetric->execute(array(
 			':host_id' => $hostId,
 			':ts' => $report['timestamp'],
-			':payload' => $payload,
 		));
 		if ($findMetric->fetchColumn() !== false) {
 			$pdo->commit();
@@ -707,6 +717,53 @@ function statuspigeon_recompute_daily($pdo, $hostId, $date)
     ));
 }
 
+function statuspigeon_meta_get($pdo, $key)
+{
+	$stmt = $pdo->prepare('SELECT value FROM hub_meta WHERE key = :key');
+	$stmt->execute(array(':key' => $key));
+	$value = $stmt->fetchColumn();
+	return $value === false ? '' : (string) $value;
+}
+
+function statuspigeon_meta_set($pdo, $key, $value)
+{
+	$stmt = $pdo->prepare(
+		'INSERT OR REPLACE INTO hub_meta (key, value) VALUES (:key, :value)'
+	);
+	$stmt->execute(array(':key' => $key, ':value' => (string) $value));
+}
+
+/**
+ * SQLite never returns pages freed by DELETE to the filesystem, so retention
+ * cleanup alone leaves the file at its historical high-water mark. Reclaim
+ * the space with a rate-limited VACUUM instead of a daemon cron.
+ */
+function statuspigeon_maybe_vacuum($pdo, $config)
+{
+	$intervalDays = isset($config['vacuum_interval_days'])
+		? (int) $config['vacuum_interval_days'] : 7;
+	$intervalDays = min(3650, max(1, $intervalDays));
+	$last = (int) statuspigeon_meta_get($pdo, 'last_vacuum_ts');
+	if ($last > 0 && time() - $last < $intervalDays * 86400) {
+		return;
+	}
+	// Record the attempt before rewriting: a failed VACUUM (e.g. a busy
+	// database) must not turn every following request into another attempt.
+	statuspigeon_meta_set($pdo, 'last_vacuum_ts', (string) time());
+
+	$freelist = (int) $pdo->query('PRAGMA freelist_count')->fetchColumn();
+	if ($freelist <= 0) {
+		return;
+	}
+	try {
+		$pdo->exec('VACUUM');
+		// Hand the WAL sidecar file back to the filesystem as well.
+		$pdo->exec('PRAGMA wal_checkpoint(TRUNCATE)');
+	} catch (Exception $e) {
+		error_log('Status Pigeon vacuum failed: ' . $e->getMessage());
+	}
+}
+
 /** Run maintenance opportunistically because PHP shared hosting has no daemon. */
 function statuspigeon_maintenance($pdo, $config)
 {
@@ -776,8 +833,10 @@ function statuspigeon_maintenance($pdo, $config)
 		);
 		$loginRate->execute(array(':now' => time(), ':cutoff' => $loginAuditCutoff));
 	} catch (Exception $e) {
-        error_log('Status Pigeon cleanup failed: ' . $e->getMessage());
-    }
+		error_log('Status Pigeon cleanup failed: ' . $e->getMessage());
+	}
+
+	statuspigeon_maybe_vacuum($pdo, $config);
 }
 
 function statuspigeon_hosts($pdo)

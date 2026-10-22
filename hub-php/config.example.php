@@ -28,14 +28,18 @@ return array(
 
     // Report timestamps are displayed in this timezone.
     'timezone' => 'Asia/Shanghai',
-    'retention_days' => 90,
-    'uptime_bar_days' => 60,
+    'retention_days' => 30,
+    'uptime_bar_days' => 30,
     // Deprecated compatibility setting; CPU percentage is no longer used.
     'degraded_cpu' => 90.0,
     'degraded_mem' => 95.0,
     'report_interval' => 300,
     'offline_periods' => 3,
     'max_report_bytes' => 1048576,
+
+    // Deleted rows stay inside the SQLite file until a VACUUM rewrites it;
+    // this controls how often that happens (1-3650 days).
+    'vacuum_interval_days' => 7,
 
     // Admin login protection. Five failures from one source within 15 minutes
     // trigger a 15-minute temporary lock; failed attempts also get a capped
