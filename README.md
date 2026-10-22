@@ -28,7 +28,7 @@ status-pigeon/
 
 ### 1. 编译
 
-构建 Hub/Agent 需 Go 1.26.5+（包含当前标准库安全修复）。若网络受限，设置国内代理：`export GOPROXY=https://goproxy.cn,direct`
+构建 Hub/Agent 需 Go 1.26.10+（包含截至目前的标准库安全修复）。若网络受限，设置国内代理：`export GOPROXY=https://goproxy.cn,direct`
 
 ```bash
 # Hub
@@ -196,6 +196,6 @@ Hub 使用 report 中的 `device_id` 作为设备唯一身份，`hostname` 仅�
 
 ## 技术栈
 
-- Go 1.26.5+（gopsutil/v3 采集、modernc.org/sqlite 纯 Go 存储）
+- Go 1.26.10+（gopsutil/v3 采集、modernc.org/sqlite 纯 Go 存储）
 - 前端：原生 HTML/CSS/JS + Chart.js（本地引入，无外网依赖）
 - 嵌入式静态资源（`go:embed`），Hub 单文件部署

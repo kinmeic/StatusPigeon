@@ -1,6 +1,6 @@
 module github.com/statuspigeon/hub
 
-go 1.26.5
+go 1.26.10
 
 require (
 	github.com/statuspigeon/metrics v0.0.0
