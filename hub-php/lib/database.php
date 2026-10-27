@@ -26,7 +26,10 @@ function statuspigeon_db($config)
 	if (is_file($path) && function_exists('chmod')) {
 		@chmod($path, 0640);
 	}
-    $pdo->exec('PRAGMA busy_timeout=5000');
+    // Long enough to queue behind the weekly VACUUM rather than fail; the
+    // real fix for lock storms is BEGIN IMMEDIATE (see below), which makes
+    // concurrent writers wait here instead of deadlocking.
+    $pdo->exec('PRAGMA busy_timeout=15000');
     $pdo->exec('PRAGMA foreign_keys=ON');
     // WAL is useful on shared hosting where the status page is read while an
     // agent is posting.  Older SQLite builds may reject it; the database is
@@ -65,6 +68,7 @@ function statuspigeon_db($config)
             payload TEXT NOT NULL,
             FOREIGN KEY(host_id) REFERENCES hosts(id)
         )',
+        'CREATE INDEX IF NOT EXISTS idx_raw_ts ON metrics_raw(ts)',
         'CREATE TABLE IF NOT EXISTS uptime_daily (
             host_id INTEGER NOT NULL,
             date TEXT NOT NULL,
@@ -115,6 +119,50 @@ function statuspigeon_db($config)
     // intentionally left in place for non-destructive upgrades, but no new
     // report reads or writes those columns.
     return $pdo;
+}
+
+/**
+ * Start a write transaction that takes SQLite's write lock up front.
+ *
+ * PDO's beginTransaction() issues a deferred BEGIN: the transaction holds
+ * only a read lock until its first INSERT/UPDATE, then upgrades.  When two
+ * concurrent requests both read and then write (a status page view running
+ * maintenance while an agent posts a report), each can hold the read lock
+ * the other needs to upgrade, and SQLite returns "database is locked"
+ * immediately without honoring busy_timeout.  BEGIN IMMEDIATE acquires the
+ * write lock before any statement runs, so concurrent writers queue behind
+ * busy_timeout instead of deadlocking.
+ *
+ * Raw statements are required because PDO (PHP 8.2+) only tracks
+ * transactions it opened itself via beginTransaction().
+ */
+function statuspigeon_begin_write($pdo)
+{
+    $pdo->exec('BEGIN IMMEDIATE');
+}
+
+function statuspigeon_commit_write($pdo)
+{
+    $pdo->exec('COMMIT');
+}
+
+/**
+ * Roll back a transaction whether PDO tracks it or not.  Transactions
+ * started with statuspigeon_begin_write() are invisible to PDO's
+ * inTransaction() on PHP 8.2+; rolling back when nothing is active must
+ * stay silent.
+ */
+function statuspigeon_rollback_quietly($pdo)
+{
+    if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+        return;
+    }
+    try {
+        $pdo->exec('ROLLBACK');
+    } catch (Exception $ignored) {
+        // No transaction was active.
+    }
 }
 
 function statuspigeon_ensure_metric_uniqueness($pdo)
@@ -211,7 +259,7 @@ function statuspigeon_migrate_host_identity($pdo)
 
     $pdo->exec('PRAGMA foreign_keys=OFF');
     try {
-        $pdo->beginTransaction();
+        statuspigeon_begin_write($pdo);
         $pdo->exec(
             'CREATE TABLE hosts_new (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -245,11 +293,9 @@ function statuspigeon_migrate_host_identity($pdo)
         $pdo->exec('ALTER TABLE hosts_new RENAME TO hosts');
         $pdo->exec('CREATE UNIQUE INDEX idx_hosts_device_id ON hosts(device_id)');
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_hosts_hostname ON hosts(hostname)');
-        $pdo->commit();
+        statuspigeon_commit_write($pdo);
     } catch (Exception $e) {
-        if ($pdo->inTransaction()) {
-            $pdo->rollBack();
-        }
+        statuspigeon_rollback_quietly($pdo);
         throw $e;
     } finally {
         $pdo->exec('PRAGMA foreign_keys=ON');
@@ -600,7 +646,7 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
         $remoteIp = null;
     }
 
-    $pdo->beginTransaction();
+    statuspigeon_begin_write($pdo);
     try {
         $findHost = $pdo->prepare('SELECT id FROM hosts WHERE device_id = :device_id');
         $findHost->execute(array(':device_id' => $deviceId));
@@ -663,7 +709,7 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
 			':ts' => $report['timestamp'],
 		));
 		if ($findMetric->fetchColumn() !== false) {
-			$pdo->commit();
+			statuspigeon_commit_write($pdo);
 			return $hostId;
 		}
 
@@ -735,12 +781,10 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
             ));
         }
         statuspigeon_recompute_daily($pdo, $hostId, $date);
-        $pdo->commit();
+        statuspigeon_commit_write($pdo);
         return $hostId;
     } catch (Exception $e) {
-        if ($pdo->inTransaction()) {
-            $pdo->rollBack();
-        }
+        statuspigeon_rollback_quietly($pdo);
         throw $e;
     }
 }
@@ -781,6 +825,7 @@ function statuspigeon_meta_get($pdo, $key)
 	$stmt = $pdo->prepare('SELECT value FROM hub_meta WHERE key = :key');
 	$stmt->execute(array(':key' => $key));
 	$value = $stmt->fetchColumn();
+	$stmt->closeCursor();
 	return $value === false ? '' : (string) $value;
 }
 
@@ -808,7 +853,13 @@ function statuspigeon_maybe_vacuum($pdo, $config)
 	}
 	// Record the attempt before rewriting: a failed VACUUM (e.g. a busy
 	// database) must not turn every following request into another attempt.
-	statuspigeon_meta_set($pdo, 'last_vacuum_ts', (string) time());
+	// A locked write here must not abort the whole request either.
+	try {
+		statuspigeon_meta_set($pdo, 'last_vacuum_ts', (string) time());
+	} catch (Exception $e) {
+		error_log('Status Pigeon vacuum failed: ' . $e->getMessage());
+		return;
+	}
 
 	$freelist = (int) $pdo->query('PRAGMA freelist_count')->fetchColumn();
 	if ($freelist <= 0) {
@@ -836,39 +887,56 @@ function statuspigeon_maintenance($pdo, $config)
 	$offlinePeriods = min(1000, max(1, (int) $config['offline_periods']));
 	$period = $reportInterval * $offlinePeriods;
     $threshold = time() - $period;
-    $pdo->beginTransaction();
     try {
-        $offline = $pdo->prepare(
-            'SELECT id, last_status FROM hosts WHERE last_seen < :threshold'
+        // Read-only fast path: while every host is current, page views must
+        // not take the write lock at all, or they queue behind report
+        // ingests for a transaction that has nothing to write.
+        $probe = $pdo->prepare(
+            'SELECT 1 FROM hosts WHERE last_seen < :threshold LIMIT 1'
         );
-        $offline->execute(array(':threshold' => $threshold));
-        $hosts = $offline->fetchAll();
-        $today = date('Y-m-d');
-        foreach ($hosts as $host) {
-            if ($host['last_status'] !== 'down') {
-                $update = $pdo->prepare('UPDATE hosts SET last_status=\'down\' WHERE id=:id');
-                $update->execute(array(':id' => (int) $host['id']));
+        $probe->execute(array(':threshold' => $threshold));
+        $hasOffline = $probe->fetchColumn() !== false;
+        // PDO leaves a statement that found its row unstepped, so its read
+        // snapshot stays open; every later write on this connection (here
+        // and in maybe_vacuum below) would then fail immediately with
+        // "database is locked" instead of honoring busy_timeout.
+        $probe->closeCursor();
+        if ($hasOffline) {
+            statuspigeon_begin_write($pdo);
+            try {
+                $offline = $pdo->prepare(
+                    'SELECT id, last_status FROM hosts WHERE last_seen < :threshold'
+                );
+                $offline->execute(array(':threshold' => $threshold));
+                $hosts = $offline->fetchAll();
+                $today = date('Y-m-d');
+                foreach ($hosts as $host) {
+                    if ($host['last_status'] !== 'down') {
+                        $update = $pdo->prepare('UPDATE hosts SET last_status=\'down\' WHERE id=:id');
+                        $update->execute(array(':id' => (int) $host['id']));
+                    }
+                    // Idempotent: repeated page views must not inflate down_samples.
+                    $insert = $pdo->prepare(
+                        'INSERT OR IGNORE INTO uptime_daily
+                         (host_id, date, status, uptime_pct, total_samples, degraded_samples, down_samples)
+                         VALUES (:host_id, :date, \'down\', 0, 1, 0, 1)'
+                    );
+                    $insert->execute(array(':host_id' => (int) $host['id'], ':date' => $today));
+                    $mark = $pdo->prepare(
+                        'UPDATE uptime_daily SET status=\'down\', uptime_pct=0,
+						 total_samples=CASE WHEN down_samples < 1 THEN total_samples + 1 ELSE total_samples END,
+                         down_samples=CASE WHEN down_samples < 1 THEN 1 ELSE down_samples END
+                         WHERE host_id=:host_id AND date=:date'
+                    );
+                    $mark->execute(array(':host_id' => (int) $host['id'], ':date' => $today));
+                }
+                statuspigeon_commit_write($pdo);
+            } catch (Exception $e) {
+                statuspigeon_rollback_quietly($pdo);
+                throw $e;
             }
-            // Idempotent: repeated page views must not inflate down_samples.
-            $insert = $pdo->prepare(
-                'INSERT OR IGNORE INTO uptime_daily
-                 (host_id, date, status, uptime_pct, total_samples, degraded_samples, down_samples)
-                 VALUES (:host_id, :date, \'down\', 0, 1, 0, 1)'
-            );
-            $insert->execute(array(':host_id' => (int) $host['id'], ':date' => $today));
-            $mark = $pdo->prepare(
-                'UPDATE uptime_daily SET status=\'down\', uptime_pct=0,
-				 total_samples=CASE WHEN down_samples < 1 THEN total_samples + 1 ELSE total_samples END,
-                 down_samples=CASE WHEN down_samples < 1 THEN 1 ELSE down_samples END
-                 WHERE host_id=:host_id AND date=:date'
-            );
-            $mark->execute(array(':host_id' => (int) $host['id'], ':date' => $today));
         }
-        $pdo->commit();
     } catch (Exception $e) {
-        if ($pdo->inTransaction()) {
-            $pdo->rollBack();
-        }
         error_log('Status Pigeon offline maintenance failed: ' . $e->getMessage());
     }
 
@@ -881,21 +949,37 @@ function statuspigeon_maintenance($pdo, $config)
 	$dailyDays = min(36500, max($retention, $barDays));
 	$cutoffDate = date('Y-m-d', time() - ($dailyDays * 86400));
 	try {
-		$raw = $pdo->prepare('DELETE FROM metrics_raw WHERE ts < :cutoff');
-		$raw->execute(array(':cutoff' => $cutoff));
-		$daily = $pdo->prepare('DELETE FROM uptime_daily WHERE date < :cutoff_date');
-		$daily->execute(array(':cutoff_date' => $cutoffDate));
-		$loginAuditRetention = isset($config['login_audit_retention_days'])
-			? (int) $config['login_audit_retention_days'] : $retention;
-		$loginAuditRetention = min(3650, max(1, $loginAuditRetention));
-		$loginAuditCutoff = time() - ($loginAuditRetention * 86400);
-		$loginAudit = $pdo->prepare('DELETE FROM admin_login_audit WHERE ts < :cutoff');
-		$loginAudit->execute(array(':cutoff' => $loginAuditCutoff));
-		$loginRate = $pdo->prepare(
-			'DELETE FROM admin_login_rate_limits
-			 WHERE locked_until < :now AND last_failed_at < :cutoff'
-		);
-		$loginRate->execute(array(':now' => time(), ':cutoff' => $loginAuditCutoff));
+		// Retention deletes are idempotent, so rate-limit them: without a
+		// gate every single request opened its own write transactions, and
+		// report bursts collided with page views on the write lock.  Record
+		// the attempt first so a locked database does not turn every
+		// following request into another attempt (same policy as VACUUM).
+		$lastCleanup = (int) statuspigeon_meta_get($pdo, 'last_cleanup_ts');
+		if ($lastCleanup <= 0 || time() - $lastCleanup >= 600) {
+			statuspigeon_meta_set($pdo, 'last_cleanup_ts', (string) time());
+			statuspigeon_begin_write($pdo);
+			try {
+				$raw = $pdo->prepare('DELETE FROM metrics_raw WHERE ts < :cutoff');
+				$raw->execute(array(':cutoff' => $cutoff));
+				$daily = $pdo->prepare('DELETE FROM uptime_daily WHERE date < :cutoff_date');
+				$daily->execute(array(':cutoff_date' => $cutoffDate));
+				$loginAuditRetention = isset($config['login_audit_retention_days'])
+					? (int) $config['login_audit_retention_days'] : $retention;
+				$loginAuditRetention = min(3650, max(1, $loginAuditRetention));
+				$loginAuditCutoff = time() - ($loginAuditRetention * 86400);
+				$loginAudit = $pdo->prepare('DELETE FROM admin_login_audit WHERE ts < :cutoff');
+				$loginAudit->execute(array(':cutoff' => $loginAuditCutoff));
+				$loginRate = $pdo->prepare(
+					'DELETE FROM admin_login_rate_limits
+					 WHERE locked_until < :now AND last_failed_at < :cutoff'
+				);
+				$loginRate->execute(array(':now' => time(), ':cutoff' => $loginAuditCutoff));
+				statuspigeon_commit_write($pdo);
+			} catch (Exception $e) {
+				statuspigeon_rollback_quietly($pdo);
+				throw $e;
+			}
+		}
 	} catch (Exception $e) {
 		error_log('Status Pigeon cleanup failed: ' . $e->getMessage());
 	}
@@ -989,7 +1073,7 @@ function statuspigeon_delete_device($pdo, $hostId)
     if ($hostId <= 0) {
         throw new InvalidArgumentException('invalid host id');
     }
-    $pdo->beginTransaction();
+    statuspigeon_begin_write($pdo);
     try {
         foreach (array('metrics_raw', 'uptime_daily') as $table) {
             $stmt = $pdo->prepare('DELETE FROM ' . $table . ' WHERE host_id = :host_id');
@@ -1000,9 +1084,9 @@ function statuspigeon_delete_device($pdo, $hostId)
         if ($stmt->rowCount() === 0) {
             throw new RuntimeException('设备不存在或已被删除');
         }
-        $pdo->commit();
+        statuspigeon_commit_write($pdo);
     } catch (Exception $e) {
-        $pdo->rollBack();
+        statuspigeon_rollback_quietly($pdo);
         throw $e;
     }
 }

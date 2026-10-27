@@ -182,25 +182,6 @@ function statuspigeon_admin_login_delay_ms($failedCount, $policy)
     return max(0, $delay);
 }
 
-/**
- * Roll back a transaction whether PDO tracks it or not.  PDO only tracks
- * transactions opened via beginTransaction() on PHP 8.2+, so transactions
- * started with a raw BEGIN statement must also be rolled back with a raw
- * statement; rolling back when nothing is active must stay silent.
- */
-function statuspigeon_rollback_quietly($pdo)
-{
-    if ($pdo->inTransaction()) {
-        $pdo->rollBack();
-        return;
-    }
-    try {
-        $pdo->exec('ROLLBACK');
-    } catch (Exception $ignored) {
-        // No transaction was active.
-    }
-}
-
 /** Record one bad credential and atomically update the source lock state. */
 function statuspigeon_admin_login_record_failure($pdo, $ip, $now, $config)
 {
