@@ -32,6 +32,36 @@ function statuspigeon_admin_session_start()
     }
 }
 
+function statuspigeon_admin_csrf_token()
+{
+    statuspigeon_admin_session_start();
+    if (empty($_SESSION['statuspigeon_csrf'])) {
+        $_SESSION['statuspigeon_csrf'] = bin2hex(random_bytes(16));
+    }
+    return (string) $_SESSION['statuspigeon_csrf'];
+}
+
+function statuspigeon_admin_csrf_ok()
+{
+    return isset($_POST['csrf'], $_SESSION['statuspigeon_csrf'])
+        && hash_equals((string) $_SESSION['statuspigeon_csrf'], (string) $_POST['csrf']);
+}
+
+function statuspigeon_admin_escape($value)
+{
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
+
+function statuspigeon_admin_redirect($message, $isError, $location)
+{
+    $_SESSION['statuspigeon_flash'] = array(
+        'message' => (string) $message,
+        'error' => (bool) $isError,
+    );
+    header('Location: ' . $location);
+    exit;
+}
+
 function statuspigeon_admin_logged_in()
 {
     statuspigeon_admin_session_start();

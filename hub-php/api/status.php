@@ -24,8 +24,9 @@ foreach (statuspigeon_hosts($pdo) as $host) {
 		'id' => (int) $host['id'],
 		'hostname' => (string) $host['hostname'],
 		'last_seen' => (int) $host['last_seen'],
-		'last_status' => (string) $host['last_status'],
-		'last_summary' => statuspigeon_public_summary($host['last_summary']),
+			'last_status' => (string) $host['last_status'],
+			'category_id' => $host['category_id'] === null ? null : (int) $host['category_id'],
+			'last_summary' => statuspigeon_public_summary($host['last_summary']),
 		'daily' => $daily,
 		'uptime_pct' => $total > 0 ? $uptime / $total * 100.0 : 0.0,
 	);

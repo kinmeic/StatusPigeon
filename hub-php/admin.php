@@ -10,15 +10,6 @@ require_once __DIR__ . '/lib/bootstrap.php';
 require_once __DIR__ . '/lib/auth.php';
 statuspigeon_admin_session_start();
 
-if (empty($_SESSION['statuspigeon_csrf'])) {
-    $_SESSION['statuspigeon_csrf'] = bin2hex(random_bytes(16));
-}
-
-function statuspigeon_admin_escape($value)
-{
-    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
-}
-
 function statuspigeon_admin_mask_key($key)
 {
     $key = (string) $key;
@@ -27,22 +18,6 @@ function statuspigeon_admin_mask_key($key)
         return str_repeat('*', $length);
     }
     return substr($key, 0, 8) . str_repeat('*', $length - 12) . substr($key, -4);
-}
-
-function statuspigeon_admin_redirect($message, $isError, $location)
-{
-    $_SESSION['statuspigeon_flash'] = array(
-        'message' => (string) $message,
-        'error' => (bool) $isError,
-    );
-    header('Location: ' . $location);
-    exit;
-}
-
-function statuspigeon_admin_csrf_ok()
-{
-    return isset($_POST['csrf'], $_SESSION['statuspigeon_csrf'])
-        && hash_equals((string) $_SESSION['statuspigeon_csrf'], (string) $_POST['csrf']);
 }
 
 function statuspigeon_admin_local_path()
@@ -96,6 +71,19 @@ function statuspigeon_admin_write_local($changes)
     if (function_exists('chmod')) {
         @chmod($path, 0640);
     }
+}
+
+function statuspigeon_admin_format_bytes($bytes)
+{
+    $bytes = max(0, (int) $bytes);
+    $units = array('B', 'KB', 'MB', 'GB', 'TB');
+    $value = (float) $bytes;
+    $unit = 0;
+    while ($value >= 1024 && $unit < count($units) - 1) {
+        $value /= 1024;
+        $unit++;
+    }
+    return number_format($value, $unit === 0 ? 0 : 2) . ' ' . $units[$unit];
 }
 
 function statuspigeon_admin_credential_ok($credential, $config)
@@ -256,10 +244,102 @@ if ($loggedIn && $action === 'delete_device') {
     }
 }
 
+if ($loggedIn && $action === 'create_category') {
+    if (!statuspigeon_admin_csrf_ok()) {
+        statuspigeon_admin_redirect('请求校验失败', true, 'admin.php?section=categories');
+    }
+    try {
+        statuspigeon_create_category($pdo, isset($_POST['name']) ? $_POST['name'] : '');
+        statuspigeon_admin_redirect('分类已新增', false, 'admin.php?section=categories');
+    } catch (Exception $e) {
+        statuspigeon_admin_redirect('新增分类失败：' . $e->getMessage(), true, 'admin.php?section=categories');
+    }
+}
+
+if ($loggedIn && $action === 'update_category') {
+    if (!statuspigeon_admin_csrf_ok()) {
+        statuspigeon_admin_redirect('请求校验失败', true, 'admin.php?section=categories');
+    }
+    $categoryId = isset($_POST['category_id']) ? (int) $_POST['category_id'] : 0;
+    try {
+        statuspigeon_update_category($pdo, $categoryId, isset($_POST['name']) ? $_POST['name'] : '');
+        statuspigeon_admin_redirect('分类名称已更新', false, 'admin.php?section=categories');
+    } catch (Exception $e) {
+        statuspigeon_admin_redirect('编辑分类失败：' . $e->getMessage(), true, 'admin.php?section=categories');
+    }
+}
+
+if ($loggedIn && $action === 'delete_category') {
+    if (!statuspigeon_admin_csrf_ok()) {
+        statuspigeon_admin_redirect('请求校验失败', true, 'admin.php?section=categories');
+    }
+    $categoryId = isset($_POST['category_id']) ? (int) $_POST['category_id'] : 0;
+    try {
+        statuspigeon_delete_category($pdo, $categoryId);
+        statuspigeon_admin_redirect('分类已删除，关联主机已恢复为未分类', false, 'admin.php?section=categories');
+    } catch (Exception $e) {
+        statuspigeon_admin_redirect('删除分类失败：' . $e->getMessage(), true, 'admin.php?section=categories');
+    }
+}
+
+if ($loggedIn && $action === 'set_device_enabled') {
+    if (!statuspigeon_admin_csrf_ok()) {
+        statuspigeon_admin_redirect('请求校验失败', true, 'admin.php?section=devices');
+    }
+    $hostId = isset($_POST['host_id']) ? (int) $_POST['host_id'] : 0;
+    $enabled = isset($_POST['enabled']) ? (string) $_POST['enabled'] : '';
+    if (!in_array($enabled, array('0', '1'), true)) {
+        statuspigeon_admin_redirect('无效的设备状态', true, 'admin.php?section=devices');
+    }
+    try {
+        statuspigeon_set_device_enabled($pdo, $hostId, $enabled === '1');
+        statuspigeon_admin_redirect($enabled === '1' ? '设备已启用' : '设备已禁用，后续上报将被丢弃', false, 'admin.php?section=devices');
+    } catch (Exception $e) {
+        statuspigeon_admin_redirect('更新设备状态失败：' . $e->getMessage(), true, 'admin.php?section=devices');
+    }
+}
+
+if ($loggedIn && $action === 'purge_device_reports') {
+    if (!statuspigeon_admin_csrf_ok()) {
+        statuspigeon_admin_redirect('请求校验失败', true, 'admin.php?section=maintenance');
+    }
+    $hostId = isset($_POST['host_id']) ? (int) $_POST['host_id'] : 0;
+    $hostname = isset($_POST['hostname']) ? trim((string) $_POST['hostname']) : '';
+    try {
+        $deleted = statuspigeon_purge_device_reports($pdo, $hostId);
+        statuspigeon_admin_redirect(
+            '已清空设备' . ($hostname === '' ? '' : '「' . $hostname . '」') . '的 ' . $deleted . ' 条上报明细，其他数据均已保留',
+            false,
+            'admin.php?section=maintenance'
+        );
+    } catch (Exception $e) {
+        statuspigeon_admin_redirect('清空明细失败：' . $e->getMessage(), true, 'admin.php?section=maintenance');
+    }
+}
+
+if ($loggedIn && $action === 'optimize_database') {
+    if (!statuspigeon_admin_csrf_ok()) {
+        statuspigeon_admin_redirect('请求校验失败', true, 'admin.php?section=maintenance');
+    }
+    try {
+        $before = statuspigeon_storage_stats($pdo, $config);
+        statuspigeon_optimize_database($pdo);
+        $after = statuspigeon_storage_stats($pdo, $config);
+        statuspigeon_admin_redirect(
+            '数据库压缩与优化已完成，大小由 ' . statuspigeon_admin_format_bytes($before['total_bytes'])
+                . ' 变为 ' . statuspigeon_admin_format_bytes($after['total_bytes']),
+            false,
+            'admin.php?section=maintenance'
+        );
+    } catch (Exception $e) {
+        statuspigeon_admin_redirect('数据库优化失败：' . $e->getMessage(), true, 'admin.php?section=maintenance');
+    }
+}
+
 $loggedIn = !empty($_SESSION['statuspigeon_admin_logged_in']);
-$csrf = (string) $_SESSION['statuspigeon_csrf'];
+$csrf = statuspigeon_admin_csrf_token();
 $section = isset($_GET['section']) ? (string) $_GET['section'] : 'api';
-if (!in_array($section, array('api', 'logs', 'password', 'devices'), true)) {
+if (!in_array($section, array('api', 'logs', 'password', 'devices', 'categories', 'maintenance'), true)) {
     $section = 'api';
 }
 $generatedKey = isset($_SESSION['statuspigeon_generated_key'])
@@ -324,6 +404,28 @@ if ($loggedIn && $section === 'devices') {
         error_log('Status Pigeon device query failed: ' . $e->getMessage());
     }
 }
+$categories = array();
+$categoriesError = '';
+$uncategorizedCount = 0;
+if ($loggedIn && $section === 'categories') {
+    try {
+        $categories = statuspigeon_categories($pdo);
+        $uncategorizedCount = statuspigeon_uncategorized_count($pdo);
+    } catch (Exception $e) {
+        $categoriesError = '分类列表查询失败';
+        error_log('Status Pigeon category query failed: ' . $e->getMessage());
+    }
+}
+$storageStats = null;
+$storageError = '';
+if ($loggedIn && $section === 'maintenance') {
+    try {
+        $storageStats = statuspigeon_storage_stats($pdo, $config);
+    } catch (Exception $e) {
+        $storageError = '数据库容量统计查询失败';
+        error_log('Status Pigeon storage stats query failed: ' . $e->getMessage());
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -384,8 +486,10 @@ if ($loggedIn && $section === 'devices') {
         <nav class="admin-menu" aria-label="管理菜单">
           <a class="<?php echo $section === 'api' ? 'active' : ''; ?>" href="admin.php?section=api">API Key 管理</a>
           <a class="<?php echo $section === 'logs' ? 'active' : ''; ?>" href="admin.php?section=logs">日志查询</a>
-          <a class="<?php echo $section === 'password' ? 'active' : ''; ?>" href="admin.php?section=password">密码管理</a>
           <a class="<?php echo $section === 'devices' ? 'active' : ''; ?>" href="admin.php?section=devices">设备管理</a>
+          <a class="<?php echo $section === 'categories' ? 'active' : ''; ?>" href="admin.php?section=categories">分类管理</a>
+          <a class="<?php echo $section === 'maintenance' ? 'active' : ''; ?>" href="admin.php?section=maintenance">数据维护</a>
+          <a class="<?php echo $section === 'password' ? 'active' : ''; ?>" href="admin.php?section=password">密码管理</a>
         </nav>
         <main class="admin-content">
           <?php if ($section === 'api'): ?>
@@ -549,7 +653,7 @@ if ($loggedIn && $section === 'devices') {
           <?php elseif ($section === 'devices'): ?>
             <section class="admin-card">
               <h2>设备管理</h2>
-              <p class="host-meta">删除设备会同时清除其历史数据；该设备下次上报时会作为全新设备重新出现。</p>
+              <p class="host-meta">禁用设备会丢弃后续上报且不在首页显示，但保留历史数据。删除设备则会同时清除其全部历史数据。</p>
               <?php if ($devicesError !== ''): ?>
                 <div class="admin-message admin-error"><?php echo statuspigeon_admin_escape($devicesError); ?></div>
               <?php elseif (!$devices): ?>
@@ -558,7 +662,7 @@ if ($loggedIn && $section === 'devices') {
                 <div class="log-table-wrap">
                   <table class="log-table">
                     <thead>
-                      <tr><th>主机</th><th>设备 ID</th><th>来源</th><th>主机状态</th><th>最近接收</th><th>操作</th></tr>
+                      <tr><th>主机</th><th>设备 ID</th><th>来源</th><th>分类</th><th>启用状态</th><th>主机状态</th><th>最近接收</th><th>操作</th></tr>
                     </thead>
                     <tbody>
                       <?php foreach ($devices as $device): ?>
@@ -575,15 +679,81 @@ if ($loggedIn && $section === 'devices') {
                           <td><?php echo statuspigeon_admin_escape($device['hostname']); ?></td>
                           <td><code title="<?php echo statuspigeon_admin_escape($deviceId); ?>"><?php echo statuspigeon_admin_escape($deviceIdShort); ?></code></td>
                           <td><?php echo statuspigeon_admin_escape($device['source']); ?></td>
+                          <td><?php echo statuspigeon_admin_escape($device['category_name'] === '' ? '未分类' : $device['category_name']); ?></td>
+                          <td><span class="badge <?php echo $device['enabled'] ? 'badge-enabled' : 'badge-disabled'; ?>"><?php echo $device['enabled'] ? '已启用' : '已禁用'; ?></span></td>
                           <td><span class="badge badge-<?php echo statuspigeon_admin_escape(in_array($deviceStatus, array('operational', 'degraded', 'down'), true) ? $deviceStatus : 'no-data'); ?>"><?php echo statuspigeon_admin_escape($deviceStatusLabel); ?></span></td>
                           <td class="log-time" data-timestamp="<?php echo (int) $device['last_seen']; ?>"><?php echo statuspigeon_admin_escape(date('Y-m-d H:i:s', (int) $device['last_seen'])); ?></td>
                           <td>
-                            <form method="post" action="admin.php?section=devices" class="inline-form" onsubmit="return confirm('确定删除设备「<?php echo statuspigeon_admin_escape($device['hostname']); ?>」？\n其历史数据将一并删除，且无法恢复。');">
-                              <input type="hidden" name="action" value="delete_device">
+                            <div class="device-actions">
+                              <form method="post" action="admin.php?section=devices" class="inline-form">
+                                <input type="hidden" name="action" value="set_device_enabled">
+                                <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
+                                <input type="hidden" name="host_id" value="<?php echo (int) $device['id']; ?>">
+                                <input type="hidden" name="enabled" value="<?php echo $device['enabled'] ? '0' : '1'; ?>">
+                                <button type="submit" class="device-action-button"><?php echo $device['enabled'] ? '禁用' : '启用'; ?></button>
+                              </form>
+                              <form method="post" action="admin.php?section=devices" class="inline-form" onsubmit="return confirm('确定删除这台设备？\n其全部历史数据将一并删除，且无法恢复。');">
+                                <input type="hidden" name="action" value="delete_device">
+                                <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
+                                <input type="hidden" name="host_id" value="<?php echo (int) $device['id']; ?>">
+                                <input type="hidden" name="hostname" value="<?php echo statuspigeon_admin_escape($device['hostname']); ?>">
+                                <button type="submit" class="danger-button device-action-button">删除</button>
+                              </form>
+                            </div>
+                          </td>
+                        </tr>
+                      <?php endforeach; ?>
+                    </tbody>
+                  </table>
+                </div>
+              <?php endif; ?>
+            </section>
+          <?php elseif ($section === 'categories'): ?>
+            <section class="admin-card">
+              <h2>分类管理</h2>
+              <p class="host-meta">分类用于首页标签筛选。“未分类”是内置默认分类，不可编辑或删除；删除自定义分类不会删除主机或历史数据。</p>
+              <form method="post" action="admin.php?section=categories" class="admin-form">
+                <input type="hidden" name="action" value="create_category">
+                <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
+                <label for="new-category-name">新增分类名称</label>
+                <div class="category-form-row">
+                  <input id="new-category-name" name="name" type="text" maxlength="80" required placeholder="例如：核心路由器">
+                  <button type="submit">新增分类</button>
+                </div>
+              </form>
+            </section>
+            <section class="admin-card">
+              <h2>现有分类</h2>
+              <?php if ($categoriesError !== ''): ?>
+                <div class="admin-message admin-error"><?php echo statuspigeon_admin_escape($categoriesError); ?></div>
+              <?php else: ?>
+                <div class="log-table-wrap">
+                  <table class="log-table">
+                    <thead><tr><th>分类名称</th><th>主机数量</th><th>操作</th></tr></thead>
+                    <tbody>
+                      <tr>
+                        <td><strong>未分类</strong> <span class="category-default">默认</span></td>
+                        <td><?php echo (int) $uncategorizedCount; ?></td>
+                        <td class="host-meta">内置分类，不可编辑或删除</td>
+                      </tr>
+                      <?php foreach ($categories as $category): ?>
+                        <tr>
+                          <td>
+                            <form method="post" action="admin.php?section=categories" class="category-edit-form">
+                              <input type="hidden" name="action" value="update_category">
                               <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
-                              <input type="hidden" name="host_id" value="<?php echo (int) $device['id']; ?>">
-                              <input type="hidden" name="hostname" value="<?php echo statuspigeon_admin_escape($device['hostname']); ?>">
-                              <button type="submit" class="danger-button device-delete-button">删除</button>
+                              <input type="hidden" name="category_id" value="<?php echo (int) $category['id']; ?>">
+                              <input name="name" type="text" maxlength="80" required aria-label="分类名称" value="<?php echo statuspigeon_admin_escape($category['name']); ?>">
+                              <button type="submit" class="device-action-button">保存</button>
+                            </form>
+                          </td>
+                          <td><?php echo (int) $category['host_count']; ?></td>
+                          <td>
+                            <form method="post" action="admin.php?section=categories" class="inline-form" onsubmit="return confirm('确定删除这个分类？\n关联主机会恢复为未分类，主机及历史数据不受影响。');">
+                              <input type="hidden" name="action" value="delete_category">
+                              <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
+                              <input type="hidden" name="category_id" value="<?php echo (int) $category['id']; ?>">
+                              <button type="submit" class="danger-button device-action-button">删除</button>
                             </form>
                           </td>
                         </tr>
@@ -593,6 +763,62 @@ if ($loggedIn && $section === 'devices') {
                 </div>
               <?php endif; ?>
             </section>
+          <?php elseif ($section === 'maintenance'): ?>
+            <section class="admin-card">
+              <h2>数据维护</h2>
+              <p class="host-meta">数据库总大小按主文件和 WAL 文件的实际磁盘占用计算。清空明细不会自动缩小文件，可在清理后执行压缩优化。</p>
+              <?php if ($storageError !== ''): ?>
+                <div class="admin-message admin-error"><?php echo statuspigeon_admin_escape($storageError); ?></div>
+              <?php else: ?>
+                <div class="storage-summary">
+                  <div class="storage-stat"><span>数据库总大小（含 WAL）</span><strong><?php echo statuspigeon_admin_escape(statuspigeon_admin_format_bytes($storageStats['total_bytes'])); ?></strong></div>
+                  <div class="storage-stat"><span>主文件</span><strong><?php echo statuspigeon_admin_escape(statuspigeon_admin_format_bytes($storageStats['main_bytes'])); ?></strong></div>
+                  <div class="storage-stat"><span>WAL 文件</span><strong><?php echo statuspigeon_admin_escape(statuspigeon_admin_format_bytes($storageStats['wal_bytes'])); ?></strong></div>
+                  <div class="storage-stat"><span>空闲页空间</span><strong><?php echo statuspigeon_admin_escape(statuspigeon_admin_format_bytes($storageStats['free_bytes'])); ?></strong></div>
+                </div>
+                <p class="host-meta">页大小 <?php echo (int) $storageStats['page_size']; ?> B，共 <?php echo (int) $storageStats['page_count']; ?> 页，其中 <?php echo (int) $storageStats['free_pages']; ?> 个空闲页可由 VACUUM 回收。</p>
+                <form method="post" action="admin.php?section=maintenance" onsubmit="return confirm('压缩优化期间可能短暂锁定数据库，并需要额外临时磁盘空间。确定继续吗？');">
+                  <input type="hidden" name="action" value="optimize_database">
+                  <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
+                  <button type="submit">压缩并优化数据库</button>
+                </form>
+                <p class="host-meta">强制执行 VACUUM、查询优化和 WAL checkpoint。优化过程中请保持其他管理操作等待完成。</p>
+              <?php endif; ?>
+            </section>
+            <?php if ($storageStats): ?>
+              <section class="admin-card">
+                <h2>主机上报明细</h2>
+                <p class="host-meta">主机占用为按原始明细行及存储字段计算的估算值，不包含日聚合、索引和空闲页。清空操作仅删除 metrics_raw 明细，保留主机、分类、启停状态、最新摘要和每日可用性历史。</p>
+                <?php if (!$storageStats['hosts']): ?>
+                  <p class="empty">暂无设备。</p>
+                <?php else: ?>
+                  <div class="log-table-wrap">
+                    <table class="log-table">
+                      <thead><tr><th>主机</th><th>状态</th><th>明细条数</th><th>估算占用</th><th>操作</th></tr></thead>
+                      <tbody>
+                        <?php foreach ($storageStats['hosts'] as $storageHost): ?>
+                          <tr>
+                            <td><?php echo statuspigeon_admin_escape($storageHost['hostname']); ?></td>
+                            <td><span class="badge <?php echo $storageHost['enabled'] ? 'badge-enabled' : 'badge-disabled'; ?>"><?php echo $storageHost['enabled'] ? '已启用' : '已禁用'; ?></span></td>
+                            <td><?php echo (int) $storageHost['report_count']; ?></td>
+                            <td><?php echo statuspigeon_admin_escape(statuspigeon_admin_format_bytes($storageHost['estimated_bytes'])); ?></td>
+                            <td>
+                              <form method="post" action="admin.php?section=maintenance" class="inline-form" onsubmit="return confirm('确定清空这台主机的全部上报明细？\n此操作无法恢复；其他主机、主机设置和每日可用性历史会保留。');">
+                                <input type="hidden" name="action" value="purge_device_reports">
+                                <input type="hidden" name="csrf" value="<?php echo statuspigeon_admin_escape($csrf); ?>">
+                                <input type="hidden" name="host_id" value="<?php echo (int) $storageHost['id']; ?>">
+                                <input type="hidden" name="hostname" value="<?php echo statuspigeon_admin_escape($storageHost['hostname']); ?>">
+                                <button type="submit" class="danger-button device-action-button" <?php echo $storageHost['report_count'] > 0 ? '' : 'disabled'; ?>>清空上报明细</button>
+                              </form>
+                            </td>
+                          </tr>
+                        <?php endforeach; ?>
+                      </tbody>
+                    </table>
+                  </div>
+                <?php endif; ?>
+              </section>
+            <?php endif; ?>
           <?php else: ?>
             <section class="admin-card">
               <h2>密码管理</h2>

@@ -8,6 +8,9 @@ switch ($resource) {
     case 'metrics':
         require __DIR__ . '/metrics.php';
         break;
+    case 'categories':
+        require __DIR__ . '/categories.php';
+        break;
     case 'status':
     default:
         require __DIR__ . '/status.php';

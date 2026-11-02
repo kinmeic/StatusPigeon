@@ -10,22 +10,47 @@
   var TAB_KEY = 'statuspigeon_host_tab';
   var tooltip = document.getElementById('tooltip');
   var lastHosts = [];
+  var lastCategories = [];
+  var lastTabs = [];
 
-  var tabs = [
-    {id: 'operational', label: '运行正常', empty: '暂无运行正常的主机。'},
-    {id: 'down', label: '离线', empty: '暂无离线主机。'}
-  ];
+  function buildTabs(categories) {
+    var dynamicTabs = [
+      {id: 'operational', type: 'status', value: 'operational', label: '运行正常', empty: '暂无运行正常的主机。'},
+      {id: 'category:0', type: 'category', categoryId: 0, label: '未分类', empty: '暂无未分类的主机。'}
+    ];
+    (Array.isArray(categories) ? categories : []).forEach(function (category) {
+      var id = Number(category.id || 0);
+      if (id <= 0) return;
+      var name = String(category.name || '');
+      dynamicTabs.push({
+        id: 'category:' + id,
+        type: 'category',
+        categoryId: id,
+        label: name,
+        empty: '“' + name + '”分类暂无主机。'
+      });
+    });
+    dynamicTabs.push({id: 'down', type: 'status', value: 'down', label: '离线', empty: '暂无离线主机。'});
+    return dynamicTabs;
+  }
 
-  function currentTab() {
+  function currentTab(tabs) {
     try {
       var saved = window.localStorage.getItem(TAB_KEY);
-      if (saved === 'operational' || saved === 'down') return saved;
+      for (var i = 0; i < tabs.length; i++) {
+        if (tabs[i].id === saved) return saved;
+      }
     } catch (ignored) {}
     return 'operational';
   }
 
-  function tabHosts(hosts, tabId) {
-    return hosts.filter(function (host) { return (host.last_status || 'no-data') === tabId; });
+  function tabHosts(hosts, tab) {
+    if (tab.type === 'category') {
+      return hosts.filter(function (host) {
+        return Number(host.category_id || 0) === tab.categoryId;
+      });
+    }
+    return hosts.filter(function (host) { return (host.last_status || 'no-data') === tab.value; });
   }
 
   function escapeHtml(value) {
@@ -218,17 +243,18 @@
     });
   }
 
-  function renderTabs(hosts) {
+  function renderTabs(hosts, categories) {
     var nav = document.getElementById('host-tabs');
+    lastTabs = buildTabs(categories);
     if (!hosts.length) {
       nav.hidden = true;
       nav.innerHTML = '';
       return;
     }
-    var active = currentTab();
+    var active = currentTab(lastTabs);
     nav.innerHTML = '';
-    tabs.forEach(function (tab) {
-      var count = tabHosts(hosts, tab.id).length;
+    lastTabs.forEach(function (tab) {
+      var count = tabHosts(hosts, tab).length;
       var button = document.createElement('button');
       button.type = 'button';
       button.className = 'host-tab' + (tab.id === active ? ' active' : '');
@@ -236,7 +262,7 @@
       button.innerHTML = escapeHtml(tab.label) + ' <span class="tab-count">' + count + '</span>';
       button.addEventListener('click', function () {
         try { window.localStorage.setItem(TAB_KEY, tab.id); } catch (ignored) {}
-        renderTabs(lastHosts);
+        renderTabs(lastHosts, lastCategories);
         renderList();
       });
       nav.appendChild(button);
@@ -245,9 +271,10 @@
   }
 
   function renderList() {
-    var active = currentTab();
+    var tabs = lastTabs.length ? lastTabs : buildTabs(lastCategories);
+    var active = currentTab(tabs);
     var tab = tabs.filter(function (item) { return item.id === active; })[0] || tabs[0];
-    var visible = applyOrder(tabHosts(lastHosts, tab.id));
+    var visible = applyOrder(tabHosts(lastHosts, tab));
     var list = document.getElementById('host-list');
     list.innerHTML = visible.length ? visible.map(hostCard).join('') :
       '<p class="empty">' + (lastHosts.length ? escapeHtml(tab.empty) : '还没有主机上报数据。') + '</p>';
@@ -255,11 +282,12 @@
     refreshIcons();
   }
 
-  function render(hosts) {
+  function render(hosts, categories) {
     lastHosts = hosts;
+    lastCategories = Array.isArray(categories) ? categories : [];
     var overall = state(hosts);
     renderBanner(overall.cls, overall.text);
-    renderTabs(hosts);
+    renderTabs(hosts, lastCategories);
     renderList();
   }
 
@@ -269,14 +297,21 @@
 
   var lastRequestedDays = requestedDays();
 
+  function fetchJson(url) {
+    return fetch(url).then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.json();
+    });
+  }
+
   function refresh() {
     var days = requestedDays();
     lastRequestedDays = days;
-    fetch('api/status.php?days=' + days).then(function (response) {
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      return response.json();
-    }).then(function (hosts) {
-      render(hosts);
+    Promise.all([
+      fetchJson('api/status.php?days=' + days),
+      fetchJson('api/categories.php')
+    ]).then(function (results) {
+      render(results[0], results[1]);
     }).catch(function (error) {
       var banner = document.getElementById('overall');
       banner.className = 'banner banner-down';

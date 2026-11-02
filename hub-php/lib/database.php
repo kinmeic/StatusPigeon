@@ -42,6 +42,11 @@ function statuspigeon_db($config)
     }
 
     $schema = array(
+        'CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            created_at INTEGER NOT NULL
+        )',
         'CREATE TABLE IF NOT EXISTS hosts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             device_id TEXT UNIQUE NOT NULL,
@@ -55,7 +60,10 @@ function statuspigeon_db($config)
             created_at INTEGER NOT NULL,
             last_status TEXT,
             last_summary TEXT,
-            source TEXT NOT NULL DEFAULT \'push\'
+            source TEXT NOT NULL DEFAULT \'push\',
+            category_id INTEGER,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY(category_id) REFERENCES categories(id) ON DELETE SET NULL
         )',
         'CREATE TABLE IF NOT EXISTS metrics_raw (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,6 +121,7 @@ function statuspigeon_db($config)
     }
     statuspigeon_migrate_host_identity($pdo);
     statuspigeon_ensure_host_remote_ip($pdo);
+    statuspigeon_ensure_host_admin_fields($pdo);
 	statuspigeon_ensure_metric_uniqueness($pdo);
 	statuspigeon_ensure_metric_disk_column($pdo);
     // Existing databases may still contain legacy I/O columns.  They are
@@ -253,6 +262,8 @@ function statuspigeon_migrate_host_identity($pdo)
     }
     $hasDeviceId = isset($columnNames['device_id']);
     $hasRemoteIp = isset($columnNames['remote_ip']);
+    $hasCategoryId = isset($columnNames['category_id']);
+    $hasEnabled = isset($columnNames['enabled']);
     if ($hasDeviceId && !statuspigeon_hosts_have_unique_hostname($pdo)) {
         return;
     }
@@ -274,20 +285,25 @@ function statuspigeon_migrate_host_identity($pdo)
                 created_at INTEGER NOT NULL,
                 last_status TEXT,
                 last_summary TEXT,
-                source TEXT NOT NULL DEFAULT \'push\'
+                source TEXT NOT NULL DEFAULT \'push\',
+                category_id INTEGER,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY(category_id) REFERENCES categories(id) ON DELETE SET NULL
             )'
         );
         $deviceExpression = $hasDeviceId
             ? "CASE WHEN device_id IS NULL OR device_id = '' THEN ('legacy-hostname:' || hostname) ELSE device_id END"
             : "('legacy-hostname:' || hostname)";
         $remoteIpExpression = $hasRemoteIp ? 'remote_ip' : 'NULL';
+        $categoryExpression = $hasCategoryId ? 'category_id' : 'NULL';
+        $enabledExpression = $hasEnabled ? 'enabled' : '1';
         $pdo->exec(
             'INSERT INTO hosts_new
              (id, device_id, hostname, agent_version, os, kernel, arch, remote_ip, last_seen,
-              created_at, last_status, last_summary, source)
+              created_at, last_status, last_summary, source, category_id, enabled)
              SELECT id, ' . $deviceExpression . ', hostname, agent_version, os,
                     kernel, arch, ' . $remoteIpExpression . ', last_seen, created_at, last_status, last_summary,
-                    source FROM hosts'
+                    source, ' . $categoryExpression . ', ' . $enabledExpression . ' FROM hosts'
         );
         $pdo->exec('DROP TABLE hosts');
         $pdo->exec('ALTER TABLE hosts_new RENAME TO hosts');
@@ -311,6 +327,29 @@ function statuspigeon_ensure_host_remote_ip($pdo)
         }
     }
     $pdo->exec('ALTER TABLE hosts ADD COLUMN remote_ip TEXT');
+}
+
+/** Add the additive admin fields without rebuilding existing host history. */
+function statuspigeon_ensure_host_admin_fields($pdo)
+{
+    $columns = $pdo->query('PRAGMA table_info(hosts)')->fetchAll();
+    $names = array();
+    foreach ($columns as $column) {
+        if (isset($column['name'])) {
+            $names[(string) $column['name']] = true;
+        }
+    }
+    if (!isset($names['category_id'])) {
+        $pdo->exec(
+            'ALTER TABLE hosts ADD COLUMN category_id INTEGER
+             REFERENCES categories(id) ON DELETE SET NULL'
+        );
+    }
+    if (!isset($names['enabled'])) {
+        $pdo->exec('ALTER TABLE hosts ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1');
+    }
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_hosts_category_id ON hosts(category_id)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_hosts_enabled ON hosts(enabled)');
 }
 
 function statuspigeon_hosts_have_unique_hostname($pdo)
@@ -648,21 +687,27 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
 
     statuspigeon_begin_write($pdo);
     try {
-        $findHost = $pdo->prepare('SELECT id FROM hosts WHERE device_id = :device_id');
+        $findHost = $pdo->prepare('SELECT id, enabled FROM hosts WHERE device_id = :device_id');
         $findHost->execute(array(':device_id' => $deviceId));
-        $hostId = (int) $findHost->fetchColumn();
+        $host = $findHost->fetch();
+        $findHost->closeCursor();
+        $hostId = $host ? (int) $host['id'] : 0;
+        $hostEnabled = $host ? (int) $host['enabled'] : 1;
         if ($hostId <= 0) {
             // Adopt a legacy row when the first device-aware report arrives
             // after an agent upgrade, preserving its existing history.
             $findLegacy = $pdo->prepare(
-                'SELECT id FROM hosts
+                'SELECT id, enabled FROM hosts
                  WHERE device_id = :legacy_id AND hostname = :hostname'
             );
             $findLegacy->execute(array(
                 ':legacy_id' => 'legacy-hostname:' . $report['hostname'],
                 ':hostname' => $report['hostname'],
             ));
-            $hostId = (int) $findLegacy->fetchColumn();
+            $legacy = $findLegacy->fetch();
+            $findLegacy->closeCursor();
+            $hostId = $legacy ? (int) $legacy['id'] : 0;
+            $hostEnabled = $legacy ? (int) $legacy['enabled'] : 1;
             if ($hostId > 0) {
                 $adopt = $pdo->prepare('UPDATE hosts SET device_id=:device_id WHERE id=:id');
                 $adopt->execute(array(':device_id' => $deviceId, ':id' => $hostId));
@@ -694,6 +739,12 @@ function statuspigeon_ingest($pdo, $report, $config, $remoteIp = '')
         }
         if ($hostId <= 0) {
             throw new RuntimeException('Unable to create host record');
+        }
+        // Disabled devices acknowledge reports so agents do not keep retrying,
+        // but none of their current state or historical aggregates is changed.
+        if (!$hostEnabled) {
+            statuspigeon_commit_write($pdo);
+            return $hostId;
         }
 
 		// Retries with the same host/timestamp are idempotent. Without this,
@@ -892,7 +943,7 @@ function statuspigeon_maintenance($pdo, $config)
         // not take the write lock at all, or they queue behind report
         // ingests for a transaction that has nothing to write.
         $probe = $pdo->prepare(
-            'SELECT 1 FROM hosts WHERE last_seen < :threshold LIMIT 1'
+            'SELECT 1 FROM hosts WHERE enabled=1 AND last_seen < :threshold LIMIT 1'
         );
         $probe->execute(array(':threshold' => $threshold));
         $hasOffline = $probe->fetchColumn() !== false;
@@ -905,7 +956,7 @@ function statuspigeon_maintenance($pdo, $config)
             statuspigeon_begin_write($pdo);
             try {
                 $offline = $pdo->prepare(
-                    'SELECT id, last_status FROM hosts WHERE last_seen < :threshold'
+                    'SELECT id, last_status FROM hosts WHERE enabled=1 AND last_seen < :threshold'
                 );
                 $offline->execute(array(':threshold' => $threshold));
                 $hosts = $offline->fetchAll();
@@ -987,16 +1038,21 @@ function statuspigeon_maintenance($pdo, $config)
 	statuspigeon_maybe_vacuum($pdo, $config);
 }
 
-function statuspigeon_hosts($pdo)
+function statuspigeon_hosts($pdo, $includeDisabled = false)
 {
     $query = $pdo->query(
-        'SELECT id, COALESCE(device_id, \'\') AS device_id, hostname, COALESCE(os, \'\') AS os,
-                COALESCE(kernel, \'\') AS kernel, COALESCE(arch, \'\') AS arch,
-                COALESCE(agent_version, \'\') AS agent_version, COALESCE(remote_ip, \'\') AS remote_ip,
-                last_seen,
-                COALESCE(last_status, \'\') AS last_status,
-                COALESCE(last_summary, \'{}\') AS last_summary, source
-         FROM hosts ORDER BY hostname'
+        'SELECT hosts.id, COALESCE(hosts.device_id, \'\') AS device_id, hosts.hostname,
+                COALESCE(hosts.os, \'\') AS os,
+                COALESCE(hosts.kernel, \'\') AS kernel, COALESCE(hosts.arch, \'\') AS arch,
+                COALESCE(hosts.agent_version, \'\') AS agent_version,
+                COALESCE(hosts.remote_ip, \'\') AS remote_ip, hosts.last_seen,
+                COALESCE(hosts.last_status, \'\') AS last_status,
+                COALESCE(hosts.last_summary, \'{}\') AS last_summary, hosts.source,
+                hosts.category_id, COALESCE(categories.name, \'\') AS category_name, hosts.enabled
+         FROM hosts
+         LEFT JOIN categories ON categories.id = hosts.category_id
+         ' . ($includeDisabled ? '' : 'WHERE hosts.enabled=1') . '
+         ORDER BY hosts.hostname'
     );
     $out = array();
     foreach ($query->fetchAll() as $row) {
@@ -1026,9 +1082,179 @@ function statuspigeon_hosts($pdo)
             'ipv4' => statuspigeon_host_ip_list($agentIPv4, $row['remote_ip'], 4),
             'ipv6' => statuspigeon_host_ip_list($agentIPv6, $row['remote_ip'], 6),
             'source' => (string) $row['source'],
+            'category_id' => $row['category_id'] === null ? null : (int) $row['category_id'],
+            'category_name' => (string) $row['category_name'],
+            'enabled' => (int) $row['enabled'] === 1,
         );
     }
     return $out;
+}
+
+function statuspigeon_category_name($name)
+{
+    $name = trim((string) $name);
+    if (!preg_match('//u', $name)
+        || preg_match('/[\x00-\x1F\x7F]/', $name)
+        || preg_match('/^.{1,80}$/u', $name) !== 1) {
+        throw new InvalidArgumentException('分类名称需为 1-80 个有效字符，且不能包含控制字符');
+    }
+    if ($name === '未分类') {
+        throw new InvalidArgumentException('“未分类”是内置默认分类，请使用其他名称');
+    }
+    return $name;
+}
+
+function statuspigeon_categories($pdo)
+{
+    $query = $pdo->query(
+        'SELECT categories.id, categories.name, categories.created_at,
+                COUNT(hosts.id) AS host_count
+         FROM categories
+         LEFT JOIN hosts ON hosts.category_id = categories.id
+         GROUP BY categories.id, categories.name, categories.created_at
+         ORDER BY categories.name COLLATE NOCASE, categories.id'
+    );
+    $out = array();
+    foreach ($query->fetchAll() as $row) {
+        $out[] = array(
+            'id' => (int) $row['id'],
+            'name' => (string) $row['name'],
+            'created_at' => (int) $row['created_at'],
+            'host_count' => (int) $row['host_count'],
+        );
+    }
+    return $out;
+}
+
+function statuspigeon_uncategorized_count($pdo)
+{
+    return (int) $pdo->query('SELECT COUNT(*) FROM hosts WHERE category_id IS NULL')->fetchColumn();
+}
+
+function statuspigeon_create_category($pdo, $name)
+{
+    $name = statuspigeon_category_name($name);
+    try {
+        $stmt = $pdo->prepare('INSERT INTO categories (name, created_at) VALUES (:name, :created_at)');
+        $stmt->execute(array(':name' => $name, ':created_at' => time()));
+    } catch (PDOException $e) {
+        if (stripos($e->getMessage(), 'unique') !== false) {
+            throw new RuntimeException('分类名称已存在');
+        }
+        throw $e;
+    }
+    return (int) $pdo->lastInsertId();
+}
+
+function statuspigeon_update_category($pdo, $categoryId, $name)
+{
+    $categoryId = (int) $categoryId;
+    if ($categoryId <= 0) {
+        throw new InvalidArgumentException('无效的分类');
+    }
+    $name = statuspigeon_category_name($name);
+    try {
+        $stmt = $pdo->prepare('UPDATE categories SET name=:name WHERE id=:id');
+        $stmt->execute(array(':name' => $name, ':id' => $categoryId));
+    } catch (PDOException $e) {
+        if (stripos($e->getMessage(), 'unique') !== false) {
+            throw new RuntimeException('分类名称已存在');
+        }
+        throw $e;
+    }
+    if ($stmt->rowCount() === 0) {
+        $exists = $pdo->prepare('SELECT 1 FROM categories WHERE id=:id');
+        $exists->execute(array(':id' => $categoryId));
+        if ($exists->fetchColumn() === false) {
+            throw new RuntimeException('分类不存在或已被删除');
+        }
+    }
+}
+
+function statuspigeon_delete_category($pdo, $categoryId)
+{
+    $categoryId = (int) $categoryId;
+    if ($categoryId <= 0) {
+        throw new InvalidArgumentException('无效的分类');
+    }
+    statuspigeon_begin_write($pdo);
+    try {
+        $exists = $pdo->prepare('SELECT 1 FROM categories WHERE id=:id');
+        $exists->execute(array(':id' => $categoryId));
+        if ($exists->fetchColumn() === false) {
+            throw new RuntimeException('分类不存在或已被删除');
+        }
+        $exists->closeCursor();
+        $reset = $pdo->prepare('UPDATE hosts SET category_id=NULL WHERE category_id=:id');
+        $reset->execute(array(':id' => $categoryId));
+        $delete = $pdo->prepare('DELETE FROM categories WHERE id=:id');
+        $delete->execute(array(':id' => $categoryId));
+        statuspigeon_commit_write($pdo);
+    } catch (Exception $e) {
+        statuspigeon_rollback_quietly($pdo);
+        throw $e;
+    }
+}
+
+function statuspigeon_device($pdo, $hostId)
+{
+    $stmt = $pdo->prepare(
+        'SELECT id, hostname, category_id, enabled FROM hosts WHERE id=:id'
+    );
+    $stmt->execute(array(':id' => (int) $hostId));
+    return $stmt->fetch();
+}
+
+function statuspigeon_set_device_category($pdo, $hostId, $categoryId)
+{
+    $hostId = (int) $hostId;
+    $categoryId = (int) $categoryId;
+    if ($hostId <= 0 || $categoryId < 0) {
+        throw new InvalidArgumentException('无效的主机或分类');
+    }
+    statuspigeon_begin_write($pdo);
+    try {
+        $host = $pdo->prepare('SELECT 1 FROM hosts WHERE id=:id');
+        $host->execute(array(':id' => $hostId));
+        if ($host->fetchColumn() === false) {
+            throw new RuntimeException('主机不存在或已被删除');
+        }
+        $host->closeCursor();
+        if ($categoryId > 0) {
+            $category = $pdo->prepare('SELECT 1 FROM categories WHERE id=:id');
+            $category->execute(array(':id' => $categoryId));
+            if ($category->fetchColumn() === false) {
+                throw new RuntimeException('分类不存在或已被删除');
+            }
+            $category->closeCursor();
+        }
+        $update = $pdo->prepare('UPDATE hosts SET category_id=:category_id WHERE id=:host_id');
+        $update->execute(array(
+            ':category_id' => $categoryId > 0 ? $categoryId : null,
+            ':host_id' => $hostId,
+        ));
+        statuspigeon_commit_write($pdo);
+    } catch (Exception $e) {
+        statuspigeon_rollback_quietly($pdo);
+        throw $e;
+    }
+}
+
+function statuspigeon_set_device_enabled($pdo, $hostId, $enabled)
+{
+    $hostId = (int) $hostId;
+    if ($hostId <= 0) {
+        throw new InvalidArgumentException('无效的主机');
+    }
+    $stmt = $pdo->prepare('UPDATE hosts SET enabled=:enabled WHERE id=:id');
+    $stmt->execute(array(':enabled' => $enabled ? 1 : 0, ':id' => $hostId));
+    if ($stmt->rowCount() === 0) {
+        $exists = $pdo->prepare('SELECT 1 FROM hosts WHERE id=:id');
+        $exists->execute(array(':id' => $hostId));
+        if ($exists->fetchColumn() === false) {
+            throw new RuntimeException('主机不存在或已被删除');
+        }
+    }
 }
 
 function statuspigeon_recent_reports($pdo, $limit, $offset = 0)
@@ -1056,9 +1282,12 @@ function statuspigeon_reports_count($pdo)
 function statuspigeon_devices($pdo)
 {
     $query = $pdo->query(
-        'SELECT id, device_id, hostname, agent_version, os, remote_ip,
-                last_seen, last_status, source, created_at
-         FROM hosts ORDER BY hostname COLLATE NOCASE, id'
+        'SELECT hosts.id, hosts.device_id, hosts.hostname, hosts.agent_version, hosts.os,
+                hosts.remote_ip, hosts.last_seen, hosts.last_status, hosts.source, hosts.created_at,
+                hosts.enabled, hosts.category_id, COALESCE(categories.name, \'\') AS category_name
+         FROM hosts
+         LEFT JOIN categories ON categories.id = hosts.category_id
+         ORDER BY hosts.hostname COLLATE NOCASE, hosts.id'
     );
     return $query->fetchAll();
 }
@@ -1089,6 +1318,91 @@ function statuspigeon_delete_device($pdo, $hostId)
         statuspigeon_rollback_quietly($pdo);
         throw $e;
     }
+}
+
+function statuspigeon_storage_file_size($path)
+{
+    if (!is_file($path)) {
+        return 0;
+    }
+    clearstatcache(true, $path);
+    $size = filesize($path);
+    return $size === false ? 0 : (int) $size;
+}
+
+/** Return actual file sizes and clearly-labelled per-host raw-row estimates. */
+function statuspigeon_storage_stats($pdo, $config)
+{
+    $path = (string) $config['db_path'];
+    $mainBytes = statuspigeon_storage_file_size($path);
+    $walBytes = statuspigeon_storage_file_size($path . '-wal');
+    $pageCount = (int) $pdo->query('PRAGMA page_count')->fetchColumn();
+    $pageSize = (int) $pdo->query('PRAGMA page_size')->fetchColumn();
+    $freePages = (int) $pdo->query('PRAGMA freelist_count')->fetchColumn();
+    $hosts = $pdo->query(
+        'SELECT hosts.id, hosts.hostname, hosts.enabled, COUNT(metrics_raw.id) AS report_count,
+                COALESCE(SUM(CASE WHEN metrics_raw.id IS NOT NULL
+                    THEN 64 + LENGTH(COALESCE(metrics_raw.payload, \'\')) ELSE 0 END), 0) AS estimated_bytes
+         FROM hosts
+         LEFT JOIN metrics_raw ON metrics_raw.host_id = hosts.id
+         GROUP BY hosts.id, hosts.hostname, hosts.enabled
+         ORDER BY hosts.hostname COLLATE NOCASE, hosts.id'
+    )->fetchAll();
+    foreach ($hosts as &$host) {
+        $host['id'] = (int) $host['id'];
+        $host['enabled'] = (int) $host['enabled'] === 1;
+        $host['report_count'] = (int) $host['report_count'];
+        $host['estimated_bytes'] = (int) $host['estimated_bytes'];
+    }
+    unset($host);
+    return array(
+        'main_bytes' => $mainBytes,
+        'wal_bytes' => $walBytes,
+        'total_bytes' => $mainBytes + $walBytes,
+        'page_count' => $pageCount,
+        'page_size' => $pageSize,
+        'free_pages' => $freePages,
+        'free_bytes' => $freePages * $pageSize,
+        'hosts' => $hosts,
+    );
+}
+
+/** Delete only raw reports; host identity, summary and daily history survive. */
+function statuspigeon_purge_device_reports($pdo, $hostId)
+{
+    $hostId = (int) $hostId;
+    if ($hostId <= 0) {
+        throw new InvalidArgumentException('无效的主机');
+    }
+    statuspigeon_begin_write($pdo);
+    try {
+        $host = $pdo->prepare('SELECT 1 FROM hosts WHERE id=:id');
+        $host->execute(array(':id' => $hostId));
+        if ($host->fetchColumn() === false) {
+            throw new RuntimeException('主机不存在或已被删除');
+        }
+        $host->closeCursor();
+        $delete = $pdo->prepare('DELETE FROM metrics_raw WHERE host_id=:host_id');
+        $delete->execute(array(':host_id' => $hostId));
+        $deleted = (int) $delete->rowCount();
+        statuspigeon_commit_write($pdo);
+        return $deleted;
+    } catch (Exception $e) {
+        statuspigeon_rollback_quietly($pdo);
+        throw $e;
+    }
+}
+
+/** Force immediate space reclamation independently of the automatic schedule. */
+function statuspigeon_optimize_database($pdo)
+{
+    if ($pdo->inTransaction()) {
+        throw new RuntimeException('请在当前事务完成后重试');
+    }
+    $pdo->exec('VACUUM');
+    $pdo->exec('PRAGMA optimize');
+    $pdo->exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    statuspigeon_meta_set($pdo, 'last_vacuum_ts', (string) time());
 }
 
 function statuspigeon_daily($pdo, $hostId, $days)
