@@ -15,8 +15,7 @@
 
   function buildTabs(categories) {
     var dynamicTabs = [
-      {id: 'operational', type: 'status', value: 'operational', label: '运行正常', empty: '暂无运行正常的主机。'},
-      {id: 'category:0', type: 'category', categoryId: 0, label: '未分类', empty: '暂无未分类的主机。'}
+      {id: 'operational', type: 'status', value: 'operational', label: '运行正常', empty: '暂无运行正常的主机。'}
     ];
     (Array.isArray(categories) ? categories : []).forEach(function (category) {
       var id = Number(category.id || 0);
@@ -27,7 +26,7 @@
         type: 'category',
         categoryId: id,
         label: name,
-        empty: '“' + name + '”分类暂无主机。'
+        empty: '“' + name + '”分类暂无运行正常的主机。'
       });
     });
     dynamicTabs.push({id: 'down', type: 'status', value: 'down', label: '离线', empty: '暂无离线主机。'});
@@ -47,7 +46,8 @@
   function tabHosts(hosts, tab) {
     if (tab.type === 'category') {
       return hosts.filter(function (host) {
-        return Number(host.category_id || 0) === tab.categoryId;
+        return Number(host.category_id || 0) === tab.categoryId
+          && (host.last_status || 'no-data') === 'operational';
       });
     }
     return hosts.filter(function (host) { return (host.last_status || 'no-data') === tab.value; });
